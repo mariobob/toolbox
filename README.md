@@ -1,6 +1,14 @@
 # Toolbox
 A collection of utility scripts for automation and productivity.
 
+## Usage
+Add aliases to your shell config (`.zshrc`, `.bashrc`, etc.):
+```bash
+alias rebase="~/path/to/easy-rebase.sh"
+alias lintcheck="~/path/to/lintcheck.sh"
+alias magic="~/path/to/reconnect-bluetooth-devices.sh"
+```
+
 ## Scripts
 ### check-ip.sh
 Checks and logs public IP address changes. Only outputs on first run and when IP changes are detected.
