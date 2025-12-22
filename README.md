@@ -7,6 +7,11 @@ Checks and logs public IP address changes. Only outputs on first run and when IP
 
 **Useful for:** Scheduling with cron or task schedulers to track IP changes over time without flooding logs.
 
+### easy-rebase.sh
+Simplifies Git rebasing with two modes: interactive rebase of last N commits (preserving author dates) or pulling a target branch and rebasing onto it.
+
+**Useful for:** Cleaning up commit history before merging or staying up-to-date with a base branch while maintaining a clean rebase workflow.
+
 ### lintcheck.sh
 Runs Python linters (black, ruff, flake8) on changed files from recent Git commits or uncommitted changes.
 
