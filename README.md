@@ -7,6 +7,7 @@ Add aliases to your shell config (`.zshrc`, `.bashrc`, etc.):
 alias rebase="~/path/to/easy-rebase.sh"
 alias lintcheck="~/path/to/lintcheck.sh"
 alias magic="~/path/to/reconnect-bluetooth-devices.sh"
+alias partial-push="~/path/to/partial-push.sh"
 ```
 
 ## Scripts
@@ -24,6 +25,11 @@ Simplifies Git rebasing with two modes: interactive rebase of last N commits (pr
 Runs Python linters (black, ruff, flake8) on changed files from recent Git commits or uncommitted changes.
 
 **Useful for:** Validating code quality before pushing to ensure all changes pass linting standards.
+
+### partial-push.sh
+Pushes commits to remote while keeping the last N commits local. Safely resets, pushes with force-with-lease, then restores local commits.
+
+**Useful for:** Pushing reviewed changes in a PR while keeping work-in-progress commits local for further refinement.
 
 ### reconnect-bluetooth-devices.sh
 Automatically reconnects Bluetooth devices. 
