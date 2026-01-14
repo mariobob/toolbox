@@ -16,7 +16,19 @@ rebase() {
             echo "N must be >= 1"
             return 1
         fi
-        git rebase -i "HEAD~$n" --committer-date-is-author-date
+
+        # Save base commit to count resulting commits after squashing
+        local base
+        base=$(git rev-parse HEAD~"$n") || return 1
+
+        git rebase -i "HEAD~$n" --committer-date-is-author-date || return $?
+
+        # Fix committer dates on resulting commits (needed after squash/edit)
+        local new_n
+        new_n=$(git rev-list --count "$base"..HEAD)
+        if [ "$new_n" -gt 0 ]; then
+            git rebase "HEAD~$new_n" --committer-date-is-author-date
+        fi
         return $?
     fi
 
