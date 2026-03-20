@@ -9,6 +9,7 @@ alias rebase="~/path/to/easy-rebase.sh"
 alias lintcheck="~/path/to/lintcheck.sh"
 alias magic="~/path/to/reconnect-bluetooth-devices.sh"
 alias partial-push="~/path/to/partial-push.sh"
+alias pull-all="~/path/to/pull-all.sh"
 ```
 
 ## Scripts
@@ -31,6 +32,11 @@ Simplifies Git rebasing with two modes: interactive rebase of last N commits (pr
 Runs Python linters (black, ruff, flake8) on changed files from recent Git commits or uncommitted changes.
 
 **Useful for:** Validating code quality before pushing to ensure all changes pass linting standards.
+
+### pull-all.sh
+Finds all git repositories under a directory (default: current directory) and pulls the latest base branch in each. Uses the same base branch detection as `easy-base.sh`.
+
+**Useful for:** Keeping all local repositories up-to-date in one command, e.g. after returning from time off.
 
 ### partial-push.sh
 Pushes commits to remote while keeping the last N commits local. Safely resets, pushes with force-with-lease, then restores local commits.
