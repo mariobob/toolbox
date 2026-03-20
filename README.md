@@ -4,6 +4,7 @@ A collection of utility scripts for automation and productivity.
 ## Usage
 Add aliases to your shell config (`.zshrc`, `.bashrc`, etc.):
 ```bash
+alias base="~/path/to/easy-base.sh"
 alias rebase="~/path/to/easy-rebase.sh"
 alias lintcheck="~/path/to/lintcheck.sh"
 alias magic="~/path/to/reconnect-bluetooth-devices.sh"
@@ -15,6 +16,11 @@ alias partial-push="~/path/to/partial-push.sh"
 Checks and logs public IP address changes. Only outputs on first run and when IP changes are detected.
 
 **Useful for:** Scheduling with cron or task schedulers to track IP changes over time without flooding logs.
+
+### easy-base.sh
+Checks out the base branch and pulls latest changes. Auto-detects the base branch via `origin/HEAD` or common names (develop, staging, main, master), or accepts an explicit branch argument.
+
+**Useful for:** Quickly jumping back to the base branch with up-to-date code before starting new work.
 
 ### easy-rebase.sh
 Simplifies Git rebasing with two modes: interactive rebase of last N commits (preserving author dates) or pulling a target branch and rebasing onto it.
