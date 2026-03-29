@@ -34,7 +34,7 @@ Runs Python linters (black, ruff, flake8) on changed files from recent Git commi
 **Useful for:** Validating code quality before pushing to ensure all changes pass linting standards.
 
 ### pull-all.sh
-Finds all git repositories under a directory (default: current directory) and pulls the latest base branch in each. Uses the same base branch detection as `easy-base.sh`.
+Finds all git repositories under a directory (default: current directory) and pulls the latest base branch in each.
 
 **Useful for:** Keeping all local repositories up-to-date in one command, e.g. after returning from time off.
 
