@@ -17,15 +17,21 @@ source "$SCRIPT_DIR/lib/log.sh"
 AUTO_YES=false
 SCAN_DIR=""
 
+# Per-repo state (parallel arrays, set during scan)
 declare -a REPO_DIRS=()
+declare -a REPO_NAMES=()
+declare -a REPO_BRANCHES=()    # current branch
+declare -a REPO_BASES=()       # detected base branch
+declare -a REPO_STATES=()      # ready | needs_switch | dirty | error
+declare -a REPO_ERRORS=()      # reason string (empty if none)
+declare -a REPO_ACTIONS=()     # pull | skip (set after prompting)
 
+# Result tracking (set during execution)
 declare -a PULLED_REPOS=()
 declare -a PULLED_COMMITS=()
 declare -a PULLED_STALENESS=()
-
 declare -a SKIPPED_REPOS=()
-declare -a SKIPPED_BRANCHES=()
-
+declare -a SKIPPED_REASONS=()
 declare -a FAILED_REPOS=()
 declare -a FAILED_REASONS=()
 
@@ -97,7 +103,41 @@ repo_display_name() {
     fi
 }
 
-# ── Repository discovery ───────────────────────────────────────────────────
+# Parse a selection string like "1,3,5" or "1-3,5" into 0-based indices on stdout.
+# Errors go to stderr. Returns non-zero on invalid input.
+parse_selection() {
+    local input="$1"
+    local max="$2"
+    local -a indices=()
+
+    IFS=',' read -ra parts <<< "$input"
+    for part in "${parts[@]}"; do
+        part="$(echo "$part" | tr -d ' ')"
+        if [[ "$part" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+            local from="${BASH_REMATCH[1]}" to="${BASH_REMATCH[2]}"
+            if (( from < 1 || to > max || from > to )); then
+                echo "Invalid range: $part (valid: 1-$max)" >&2
+                return 1
+            fi
+            for (( n=from; n<=to; n++ )); do
+                indices+=($((n - 1)))
+            done
+        elif [[ "$part" =~ ^[0-9]+$ ]]; then
+            if (( part < 1 || part > max )); then
+                echo "Invalid number: $part (valid: 1-$max)" >&2
+                return 1
+            fi
+            indices+=($((part - 1)))
+        else
+            echo "Invalid selection: $part" >&2
+            return 1
+        fi
+    done
+
+    printf '%s\n' "${indices[@]}" | sort -nu
+}
+
+# ── Phase 1: Discover ──────────────────────────────────────────────────────
 
 discover_repos() {
     while IFS= read -r git_dir; do
@@ -112,93 +152,232 @@ discover_repos() {
     log_info "Found ${#REPO_DIRS[@]} repositories"
 }
 
-# ── Per-repo processing ────────────────────────────────────────────────────
+# ── Phase 2: Scan (no I/O — local git state only) ──────────────────────────
 
-process_repos() {
+scan_repos() {
     for repo_dir in "${REPO_DIRS[@]}"; do
-        process_repo "$repo_dir"
+        local repo_name
+        repo_name=$(repo_display_name "$repo_dir")
+        REPO_NAMES+=("$repo_name")
+
+        # Detect base branch
+        local base_branch
+        base_branch=$(get_base_branch "$repo_dir")
+        REPO_BASES+=("${base_branch:-}")
+
+        if [[ -z "$base_branch" ]]; then
+            REPO_BRANCHES+=("—")
+            REPO_STATES+=("error")
+            REPO_ERRORS+=("no base branch detected")
+            REPO_ACTIONS+=("skip")
+            continue
+        fi
+
+        # Get current branch
+        local current_branch
+        current_branch=$(git -C "$repo_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+        if [[ -z "$current_branch" || "$current_branch" == "HEAD" ]]; then
+            REPO_BRANCHES+=("HEAD (detached)")
+            REPO_STATES+=("error")
+            REPO_ERRORS+=("detached HEAD")
+            REPO_ACTIONS+=("skip")
+            continue
+        fi
+
+        REPO_BRANCHES+=("$current_branch")
+
+        if [[ "$current_branch" == "$base_branch" ]]; then
+            REPO_STATES+=("ready")
+            REPO_ERRORS+=("")
+            REPO_ACTIONS+=("pull")
+        elif ! git -C "$repo_dir" diff --quiet 2>/dev/null || ! git -C "$repo_dir" diff --cached --quiet 2>/dev/null; then
+            REPO_STATES+=("dirty")
+            REPO_ERRORS+=("uncommitted changes on '${current_branch}'")
+            REPO_ACTIONS+=("skip")
+        else
+            REPO_STATES+=("needs_switch")
+            REPO_ERRORS+=("")
+            REPO_ACTIONS+=("pending")
+        fi
     done
 }
 
-process_repo() {
-    local repo_dir="$1"
-    local repo_name
-    repo_name=$(repo_display_name "$repo_dir")
+# ── Phase 3: Present & Prompt ──────────────────────────────────────────────
+
+present_scan() {
+    # Calculate column widths from actual data (capped at 80 to keep it readable)
+    local max_name=10 max_branch=6 max_base=4
+    for i in "${!REPO_NAMES[@]}"; do
+        local nl=${#REPO_NAMES[$i]} bl=${#REPO_BRANCHES[$i]} bal=${#REPO_BASES[$i]}
+        (( nl  > max_name   )) && max_name=$nl
+        (( bl  > max_branch )) && max_branch=$bl
+        (( bal > max_base   )) && max_base=$bal
+    done
+    (( max_name   > 80 )) && max_name=80
+    (( max_branch > 80 )) && max_branch=80
+    (( max_base   > 80 )) && max_base=80
+    # Add 2 chars of gutter between columns
+    local wn=$(( max_name + 2 )) wb=$(( max_branch + 2 )) wba=$(( max_base + 2 ))
+
+    echo ""
+    printf "  ${COLOR_BOLD}%-${wn}s %-${wb}s %-${wba}s %s${COLOR_RESET}\n" "REPOSITORY" "BRANCH" "BASE" "STATUS"
+    printf "  %-${wn}s %-${wb}s %-${wba}s %s\n" "----------" "------" "----" "------"
+
+    for i in "${!REPO_NAMES[@]}"; do
+        local status_text status_color
+        case "${REPO_STATES[$i]}" in
+            ready)        status_text="ready";              status_color="$COLOR_GREEN"  ;;
+            needs_switch) status_text="switch?";            status_color="$COLOR_YELLOW" ;;
+            dirty)        status_text="dirty — skip";       status_color="$COLOR_YELLOW" ;;
+            error)        status_text="${REPO_ERRORS[$i]}";  status_color="$COLOR_RED"    ;;
+        esac
+
+        printf "  %-${wn}s %-${wb}s %-${wba}s ${status_color}%s${COLOR_RESET}\n" \
+            "${REPO_NAMES[$i]}" "${REPO_BRANCHES[$i]}" "${REPO_BASES[$i]:-—}" "$status_text"
+    done
+
+    # Count by state
+    local ready=0 switch=0 dirty=0 errors=0
+    for state in "${REPO_STATES[@]}"; do
+        case "$state" in
+            ready)        ready=$((ready + 1)) ;;
+            needs_switch) switch=$((switch + 1)) ;;
+            dirty)        dirty=$((dirty + 1)) ;;
+            error)        errors=$((errors + 1)) ;;
+        esac
+    done
+
+    echo ""
+    local parts=()
+    (( ready  > 0 )) && parts+=("${COLOR_GREEN}${ready} ready${COLOR_RESET}")
+    (( switch > 0 )) && parts+=("${COLOR_YELLOW}${switch} need switch${COLOR_RESET}")
+    (( dirty  > 0 )) && parts+=("${COLOR_YELLOW}${dirty} dirty${COLOR_RESET}")
+    (( errors > 0 )) && parts+=("${COLOR_RED}${errors} error${COLOR_RESET}")
+    local IFS=", "
+    echo -e "  ${parts[*]}"
+}
+
+prompt_switches() {
+    # Collect indices of repos that need a decision
+    local -a switch_indices=()
+    for i in "${!REPO_STATES[@]}"; do
+        [[ "${REPO_STATES[$i]}" == "needs_switch" ]] && switch_indices+=("$i")
+    done
+
+    if [[ ${#switch_indices[@]} -eq 0 ]]; then
+        return
+    fi
+
+    # Auto-switch with -y
+    if [[ "$AUTO_YES" == true ]]; then
+        for idx in "${switch_indices[@]}"; do
+            REPO_ACTIONS[$idx]="pull"
+        done
+        log_info "Auto-switching ${#switch_indices[@]} repos to base branch (-y)"
+        return
+    fi
+
+    # Show numbered list
+    echo ""
+    log_warn "Repos not on base branch:"
+    for n in "${!switch_indices[@]}"; do
+        local idx="${switch_indices[$n]}"
+        printf "  ${COLOR_BOLD}%2d${COLOR_RESET}) %-28s %s → %s\n" \
+            "$((n + 1))" "${REPO_NAMES[$idx]}" "${REPO_BRANCHES[$idx]}" "${REPO_BASES[$idx]}"
+    done
+    echo ""
+
+    read -rp "Switch all ${#switch_indices[@]} repos to base branch? [Y/n] " answer
+    if [[ "${answer:-Y}" =~ ^[Yy]$ ]]; then
+        for idx in "${switch_indices[@]}"; do
+            REPO_ACTIONS[$idx]="pull"
+        done
+        return
+    fi
+
+    # Selective switching — default all to skip, then mark selected for pull
+    for idx in "${switch_indices[@]}"; do
+        REPO_ACTIONS[$idx]="skip"
+    done
+
+    read -rp "Select which to switch (e.g. 1,3 or 1-3), or Enter to skip all: " selection
+    if [[ -z "$selection" ]]; then
+        log_info "Skipping all branch switches"
+        return
+    fi
+
+    local selection_output
+    if ! selection_output=$(parse_selection "$selection" "${#switch_indices[@]}"); then
+        log_warn "Invalid selection — skipping all"
+        return
+    fi
+
+    local -a selected
+    mapfile -t selected <<< "$selection_output"
+
+    for sel_idx in "${selected[@]}"; do
+        REPO_ACTIONS[${switch_indices[$sel_idx]}]="pull"
+    done
+}
+
+# ── Phase 4: Execute (all I/O happens here — no more prompts) ──────────────
+
+execute_pulls() {
+    # Safety: resolve any remaining pending actions
+    for i in "${!REPO_ACTIONS[@]}"; do
+        [[ "${REPO_ACTIONS[$i]}" == "pending" ]] && REPO_ACTIONS[$i]="skip"
+    done
+
+    # Count repos to pull
+    local pull_count=0
+    for action in "${REPO_ACTIONS[@]}"; do
+        [[ "$action" == "pull" ]] && pull_count=$((pull_count + 1))
+    done
+
+    if [[ $pull_count -eq 0 ]]; then
+        log_warn "No repositories to pull"
+    else
+        log_info "Pulling ${pull_count} repositories ..."
+        for i in "${!REPO_DIRS[@]}"; do
+            [[ "${REPO_ACTIONS[$i]}" != "pull" ]] && continue
+            execute_single_repo "$i"
+        done
+    fi
+
+    # Record skipped repos
+    for i in "${!REPO_DIRS[@]}"; do
+        if [[ "${REPO_ACTIONS[$i]}" == "skip" ]]; then
+            SKIPPED_REPOS+=("${REPO_NAMES[$i]}")
+            case "${REPO_STATES[$i]}" in
+                needs_switch) SKIPPED_REASONS+=("on '${REPO_BRANCHES[$i]}'") ;;
+                dirty)        SKIPPED_REASONS+=("${REPO_BRANCHES[$i]} (dirty)") ;;
+                error)        SKIPPED_REASONS+=("${REPO_ERRORS[$i]}") ;;
+                *)            SKIPPED_REASONS+=("skipped") ;;
+            esac
+        fi
+    done
+}
+
+execute_single_repo() {
+    local i="$1"
+    local repo_dir="${REPO_DIRS[$i]}"
+    local repo_name="${REPO_NAMES[$i]}"
+    local base_branch="${REPO_BASES[$i]}"
 
     echo ""
     log_info "${COLOR_BOLD}${repo_name}${COLOR_RESET}"
 
-    # Detect base branch
-    local base_branch
-    base_branch=$(get_base_branch "$repo_dir")
-    if [[ -z "$base_branch" ]]; then
-        log_error "  Could not detect base branch"
-        FAILED_REPOS+=("$repo_name")
-        FAILED_REASONS+=("could not detect base branch")
-        return
-    fi
-
-    # Get current branch
-    local current_branch
-    current_branch=$(git -C "$repo_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
-    if [[ -z "$current_branch" || "$current_branch" == "HEAD" ]]; then
-        log_error "  Detached HEAD state"
-        FAILED_REPOS+=("$repo_name")
-        FAILED_REASONS+=("detached HEAD")
-        return
-    fi
-
-    # Handle non-base branch
-    if [[ "$current_branch" != "$base_branch" ]]; then
-        if ! handle_branch_switch "$repo_dir" "$repo_name" "$current_branch" "$base_branch"; then
+    # Switch branch if needed
+    if [[ "${REPO_STATES[$i]}" == "needs_switch" ]]; then
+        log_info "  Switching '${REPO_BRANCHES[$i]}' → '${base_branch}'"
+        if ! git -C "$repo_dir" checkout "$base_branch" --quiet 2>/dev/null; then
+            log_error "  Failed to checkout '${base_branch}'"
+            FAILED_REPOS+=("$repo_name")
+            FAILED_REASONS+=("checkout '${base_branch}' failed")
             return
         fi
+        log_success "  Switched to '${base_branch}'"
     fi
-
-    pull_repo "$repo_dir" "$repo_name"
-}
-
-handle_branch_switch() {
-    local repo_dir="$1"
-    local repo_name="$2"
-    local current_branch="$3"
-    local base_branch="$4"
-
-    # Check for uncommitted changes — never switch a dirty tree
-    if ! git -C "$repo_dir" diff --quiet 2>/dev/null || ! git -C "$repo_dir" diff --cached --quiet 2>/dev/null; then
-        log_warn "  On '${current_branch}' with uncommitted changes — skipping"
-        SKIPPED_REPOS+=("$repo_name")
-        SKIPPED_BRANCHES+=("${current_branch} (dirty)")
-        return 1
-    fi
-
-    if [[ "$AUTO_YES" == true ]]; then
-        log_info "  Switching '${current_branch}' → '${base_branch}'"
-    else
-        log_warn "  On '${current_branch}' (base: '${base_branch}')"
-        read -rp "  Switch to '${base_branch}'? [y/N] " answer
-        if [[ ! "${answer:-}" =~ ^[Yy]$ ]]; then
-            log_info "  Skipped"
-            SKIPPED_REPOS+=("$repo_name")
-            SKIPPED_BRANCHES+=("$current_branch")
-            return 1
-        fi
-    fi
-
-    if ! git -C "$repo_dir" checkout "$base_branch" --quiet 2>/dev/null; then
-        log_error "  Failed to checkout '${base_branch}'"
-        FAILED_REPOS+=("$repo_name")
-        FAILED_REASONS+=("checkout '${base_branch}' failed")
-        return 1
-    fi
-
-    log_success "  Switched to '${base_branch}'"
-    return 0
-}
-
-pull_repo() {
-    local repo_dir="$1"
-    local repo_name="$2"
 
     # Record pre-pull state
     local old_head
@@ -216,7 +395,7 @@ pull_repo() {
 
     # Pull (fast-forward only — never creates merge commits)
     if ! git -C "$repo_dir" pull --ff-only --quiet 2>/dev/null; then
-        log_error "  Pull failed — local branch has diverged (rebase/merge needed)"
+        log_error "  Pull failed — local branch has diverged"
         FAILED_REPOS+=("$repo_name")
         FAILED_REASONS+=("not fast-forwardable")
         return
@@ -247,12 +426,11 @@ pull_repo() {
     PULLED_STALENESS+=("$staleness")
 }
 
-# ── Summary ─────────────────────────────────────────────────────────────────
+# ── Phase 5: Summary ───────────────────────────────────────────────────────
 
 print_summary() {
     log_step "Summary"
 
-    # Pulled
     if [[ ${#PULLED_REPOS[@]} -gt 0 ]]; then
         echo -e "${COLOR_GREEN}Pulled (${#PULLED_REPOS[@]}):${COLOR_RESET}"
         printf "  ${COLOR_BOLD}%-30s %-10s %s${COLOR_RESET}\n" "REPOSITORY" "COMMITS" "WAS BEHIND"
@@ -266,17 +444,15 @@ print_summary() {
         echo ""
     fi
 
-    # Skipped
     if [[ ${#SKIPPED_REPOS[@]} -gt 0 ]]; then
         echo -e "${COLOR_YELLOW}Skipped (${#SKIPPED_REPOS[@]}):${COLOR_RESET}"
-        printf "  ${COLOR_BOLD}%-30s %s${COLOR_RESET}\n" "REPOSITORY" "BRANCH"
+        printf "  ${COLOR_BOLD}%-30s %s${COLOR_RESET}\n" "REPOSITORY" "REASON"
         for i in "${!SKIPPED_REPOS[@]}"; do
-            printf "  %-30s ${COLOR_YELLOW}%s${COLOR_RESET}\n" "${SKIPPED_REPOS[$i]}" "${SKIPPED_BRANCHES[$i]}"
+            printf "  %-30s ${COLOR_YELLOW}%s${COLOR_RESET}\n" "${SKIPPED_REPOS[$i]}" "${SKIPPED_REASONS[$i]}"
         done
         echo ""
     fi
 
-    # Failed
     if [[ ${#FAILED_REPOS[@]} -gt 0 ]]; then
         echo -e "${COLOR_RED}Failed (${#FAILED_REPOS[@]}):${COLOR_RESET}"
         printf "  ${COLOR_BOLD}%-30s %s${COLOR_RESET}\n" "REPOSITORY" "REASON"
@@ -286,7 +462,6 @@ print_summary() {
         echo ""
     fi
 
-    # Totals
     local total=$(( ${#PULLED_REPOS[@]} + ${#SKIPPED_REPOS[@]} + ${#FAILED_REPOS[@]} ))
     local total_commits=0
     for c in ${PULLED_COMMITS[@]+"${PULLED_COMMITS[@]}"}; do
@@ -301,11 +476,14 @@ print_summary() {
 main() {
     parse_args "$@"
 
-    log_step "Scanning for repositories"
+    log_step "Scanning repositories"
     discover_repos
+    scan_repos
+    present_scan
+    prompt_switches
 
     log_step "Pulling repositories"
-    process_repos
+    execute_pulls
 
     print_summary
 
