@@ -14,9 +14,11 @@ device_names=(
     "keyboard"
     "trackpad"
 )
+# Your devices' MAC addresses. Find them with `blueutil --paired`, then either edit the
+# placeholders below or export BT_KEYBOARD_MAC / BT_TRACKPAD_MAC in your shell config.
 device_macs=(
-    "3c-a6-f6-f1-4a-2d"
-    "3c-a6-f6-bf-6c-23"
+    "${BT_KEYBOARD_MAC:-aa-bb-cc-dd-ee-01}"
+    "${BT_TRACKPAD_MAC:-aa-bb-cc-dd-ee-02}"
 )
 
 # Function to handle device connection reset
