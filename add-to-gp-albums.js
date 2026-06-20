@@ -206,31 +206,35 @@ async function addOne(page, filename, album) {
   return isAmbiguous ? { status: 'ambiguous', n: m.unique || m.raw, added: true } : 'added';
 }
 
-// Select the first result via its hover-checkbox (top-left corner of the tile). The freshly-rendered
-// grid isn't interactive the instant it paints (removing the old settle here is what broke selection),
-// and a mis-aimed click can OPEN the photo instead of selecting it — so we settle, hover to reveal the
-// checkbox, click it, confirm "N selected", and on failure back out of any accidental open and retry.
+// Select the first result via its hover-checkbox (top-left corner of the tile). Instead of fixed
+// sleeps, we POLL: wait only until the tile stops moving (so the checkbox is where we aim), click,
+// then quickly check for "N selected"; on a miss we retry fast (a stray click can OPEN the photo, so
+// we back out of that first). Fast on a hit (~1s), cheap on a miss — no 4-5s dead time per photo.
 async function selectFirstPhoto(page) {
   const photo = page.getByRole('link', { name: /^Photo/ }).first();
-  for (let attempt = 0; attempt < 4; attempt++) {
-    await photo.scrollIntoViewIfNeeded().catch(() => {});
-    await sleep(attempt === 0 ? 900 : 500);                          // let the grid become interactive
-    const b = await photo.boundingBox().catch(() => null);
+  const selected = page.getByText(/\b\d+ selected\b/).first();
+  await photo.scrollIntoViewIfNeeded().catch(() => {});
+  for (let attempt = 0; attempt < 6; attempt++) {
+    // poll until the tile's position is stable (fast when it's already settled)
+    let b = null, prev = null;
+    for (let i = 0; i < 10; i++) {
+      b = await photo.boundingBox().catch(() => null);
+      if (b && prev && Math.abs(b.x - prev.x) < 2 && Math.abs(b.y - prev.y) < 2) break;
+      prev = b;
+      await sleep(200);
+    }
     if (b) {
       await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2);  // hover reveals the checkbox
-      await sleep(500);
+      await sleep(300);
       await page.mouse.click(b.x + 16, b.y + 16);                    // click the checkmark
-      try {
-        await page.getByText(/\b\d+ selected\b/).first().waitFor({ timeout: 4000 });
-        return true;
-      } catch {}
+      try { await selected.waitFor({ timeout: 1500 }); return true; } catch {} // quick check, not a long wait
     }
-    // a click can accidentally OPEN the photo instead of selecting -> return to results and retry
+    // a click can accidentally OPEN the photo instead of selecting -> return to results, then retry
     if (!page.url().includes('/search/')) {
       await page.goBack({ waitUntil: 'domcontentloaded' }).catch(() => {});
-      await page.waitForURL(/\/search\//, { timeout: 5000 }).catch(() => {});
+      await page.waitForURL(/\/search\//, { timeout: 4000 }).catch(() => {});
     }
-    await sleep(600);
+    await sleep(250);
   }
   return false;
 }
@@ -276,10 +280,10 @@ async function waitForResults(page) {
     const n = await tiles();
     if (n > 0) {                              // photos present -> let the count stop growing
       let stable = n;
-      for (let j = 0; j < 8; j++) {
-        await sleep(500);
+      for (let j = 0; j < 6; j++) {
+        await sleep(300);
         const n2 = await tiles();
-        if (n2 === stable) return stable;
+        if (n2 === stable) return stable;     // two equal reads => settled (min ~300ms)
         stable = n2;
       }
       return stable;
