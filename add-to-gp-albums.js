@@ -190,34 +190,33 @@ async function addOne(page, filename, album) {
   return 'added';
 }
 
-// Select the first result via its hover-checkbox (top-left corner of the tile). Instead of fixed
-// sleeps, we POLL: wait only until the tile stops moving (so the checkbox is where we aim), click,
-// then quickly check for "N selected"; on a miss we retry fast (a stray click can OPEN the photo, so
-// we back out of that first). Fast on a hit (~1s), cheap on a miss — no 4-5s dead time per photo.
+// Select the first SEARCH-RESULT photo via its hover-checkbox (top-left of the tile).
+// HARD SAFETY: only ever act while on the results grid — URL contains "/search/" and NOT "/photo/".
+// If a click opens the viewer (URL gains /photo/) or navigates anywhere else (e.g. back to the home
+// library), we ABORT (return false) instead of clicking whatever is on screen. This is what prevents
+// the catastrophic bug of selecting an unrelated photo (the home library's most-recent) and adding it.
+// We never try to "recover" by pressing Escape / going back — that's exactly what jumped to home.
 async function selectFirstPhoto(page) {
+  const onResults = () => page.url().includes('/search/') && !page.url().includes('/photo/');
   const photo = page.getByRole('link', { name: /^Photo/ }).first();
   const selected = page.getByText(/\b\d+ selected\b/).first();
-  await photo.scrollIntoViewIfNeeded().catch(() => {});
-  for (let attempt = 0; attempt < 6; attempt++) {
-    // poll until the tile's position is stable (fast when it's already settled)
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (!onResults()) return false;                                  // never act off the results grid
+    // poll until the tile's position is stable (fast when already settled), so we hit the checkbox
     let b = null, prev = null;
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < 8; i++) {
+      if (!onResults()) return false;
       b = await photo.boundingBox().catch(() => null);
       if (b && prev && Math.abs(b.x - prev.x) < 2 && Math.abs(b.y - prev.y) < 2) break;
       prev = b;
       await sleep(200);
     }
-    if (b) {
-      // Hover the TOP-LEFT (where the checkbox is), never the center — on a video the center is the
-      // play button, and clicking it opens/plays the video instead of selecting it (that's the hang).
-      await page.mouse.move(b.x + 16, b.y + 16);                     // hover here reveals + lands on the checkbox
-      await sleep(300);
-      await page.mouse.click(b.x + 16, b.y + 16);                    // click the checkmark
-      try { await selected.waitFor({ timeout: 1500 }); return true; } catch {} // quick check, not a long wait
-    }
-    // a click may have OPENED the item (detail view) instead of selecting it — Escape closes the
-    // viewer and returns to the results grid (harmless if nothing opened). Then retry.
-    await page.keyboard.press('Escape').catch(() => {});
+    if (!b) { await sleep(300); continue; }
+    await page.mouse.move(b.x + 16, b.y + 16);   // hover the checkbox area (top-left) — NOT the center,
+    await sleep(300);                            // which on a video is the play button (opens the video)
+    await page.mouse.click(b.x + 16, b.y + 16);  // click the checkmark
+    try { await selected.waitFor({ timeout: 2000 }); return onResults(); } catch {}
+    if (!onResults()) return false;              // the click opened the viewer / left the grid -> bail
     await sleep(300);
   }
   return false;
