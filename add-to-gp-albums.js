@@ -42,6 +42,10 @@ const slowMo = args.includes('--headful-slow') ? 250 : 60;
 
 const sleep  = ms => new Promise(r => setTimeout(r, ms));
 const jitter = (a, b) => Math.round(a + Math.random() * (b - a));
+const ts     = () => new Date().toTimeString().slice(0, 8);   // HH:MM:SS prefix for log lines
+// Hard cap per photo so a single problematic item (e.g. an odd video) can never stall the whole run.
+const withTimeout = (p, ms) =>
+  Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(`item timeout after ${ms / 1000}s`)), ms))]);
 const MOD = process.platform === 'darwin' ? 'Meta' : 'Control';
 
 (async () => {
@@ -79,6 +83,7 @@ const MOD = process.platform === 'darwin' ? 'Meta' : 'Control';
 
   await page.goto('https://photos.google.com/', { waitUntil: 'domcontentloaded' });
   await ensureLoggedIn(page);
+  page.setDefaultTimeout(20000); // snappier failures than Playwright's 30s default
   // NOTE: never browser.close() — it's your real Chrome.
 
   let added = 0;
@@ -87,31 +92,31 @@ const MOD = process.platform === 'darwin' ? 'Meta' : 'Control';
     progress[name]          = progress[name] || {};
     progress[name].done     = progress[name].done     || [];
     progress[name].notFound = progress[name].notFound || [];
-    console.log(`\n=== ${name}  ->  "${album}"  (${data[name].count} photos) ===`);
+    console.log(`\n[${ts()}] === ${name}  ->  "${album}"  (${data[name].count} photos) ===`);
     for (const filename of data[name].filenames) {
       if (added >= limit) { console.log('Reached --limit.'); save(); writeManualReview(progress, data); return; }
       if (progress[name].done.includes(filename) ||
           progress[name].notFound.includes(filename)) continue;
       try {
-        const r = await addOne(page, filename, album);
+        const r = await withTimeout(addOne(page, filename, album), 75000); // never hang on one item
         if (r === 'notfound') {
           progress[name].notFound.push(filename);
-          console.log(`  –  not in GP search: ${filename}`);
+          console.log(`  [${ts()}]  –  not in GP search: ${filename}`);
         } else {
           progress[name].done.push(filename); added++;
-          console.log(`  +  added:  ${filename}`);
+          console.log(`  [${ts()}]  +  added:  ${filename}`);
         }
         save();
       } catch (e) {
         const shot = path.join(SHOTS, `${name}__${filename.replace(/[^\w.-]/g, '_')}.png`);
         try { await page.screenshot({ path: shot }); } catch {}
-        console.log(`  !  ERROR ${filename}: ${e.message}\n     screenshot -> ${shot}`);
+        console.log(`  [${ts()}]  !  ERROR ${filename}: ${e.message}\n     screenshot -> ${shot}`);
       }
       await sleep(jitter(700, 1600)); // throttle (be polite, avoid rate-limit)
     }
   }
   writeManualReview(progress, data);
-  console.log(`\nDone this run. Added ${added}. Progress: ${PROGRESS}.`);
+  console.log(`\n[${ts()}] Done this run. Added ${added}. Progress: ${PROGRESS}.`);
   console.log(`Not-found list (need manual handling): ${path.join(__dirname, 'gp-manual-review.txt')}`);
   console.log('Browser left open for review.');
 })();
@@ -203,17 +208,17 @@ async function selectFirstPhoto(page) {
       await sleep(200);
     }
     if (b) {
-      await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2);  // hover reveals the checkbox
+      // Hover the TOP-LEFT (where the checkbox is), never the center — on a video the center is the
+      // play button, and clicking it opens/plays the video instead of selecting it (that's the hang).
+      await page.mouse.move(b.x + 16, b.y + 16);                     // hover here reveals + lands on the checkbox
       await sleep(300);
       await page.mouse.click(b.x + 16, b.y + 16);                    // click the checkmark
       try { await selected.waitFor({ timeout: 1500 }); return true; } catch {} // quick check, not a long wait
     }
-    // a click can accidentally OPEN the photo instead of selecting -> return to results, then retry
-    if (!page.url().includes('/search/')) {
-      await page.goBack({ waitUntil: 'domcontentloaded' }).catch(() => {});
-      await page.waitForURL(/\/search\//, { timeout: 4000 }).catch(() => {});
-    }
-    await sleep(250);
+    // a click may have OPENED the item (detail view) instead of selecting it — Escape closes the
+    // viewer and returns to the results grid (harmless if nothing opened). Then retry.
+    await page.keyboard.press('Escape').catch(() => {});
+    await sleep(300);
   }
   return false;
 }
