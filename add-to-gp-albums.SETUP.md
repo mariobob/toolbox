@@ -46,19 +46,16 @@ error screenshots go to `shots/`.
 Then in Google Photos: open each `[Photos] X dry-run` → eyeball → select-all → add to the real
 `[Photos] X` → delete the dry-run.
 
-**Needs manual attention (`gp-manual-review.txt`):** some names (e.g. `DSC_0059.JPG`, `MOVIE.mp4`)
-match **several different** photos in Google Photos. By **default** the script still adds GP's
-most-relevant match but **flags it to verify** (logged `+? added BEST-GUESS (N matches — verify)`) —
-wrong picks usually sit in a different date cluster in the dry-run album, easy to spot and delete,
-while right picks save you the manual add. Names that return **no** match are logged
-`–  not in GP search`. Both kinds go into **`gp-manual-review.txt`**: after a run, open it, confirm
-each `VERIFY auto-added` photo is correct (remove + re-search if wrong), and add the `not found`
-ones by hand. Prefer the old skip-don't-add behaviour? Run with **`--skip-ambiguous`**.
+**Multiple matches & review:** some names (e.g. `DSC_0059.JPG`) match **several different** photos in
+Google Photos. The script adds GP's **most-relevant** match (best guess) — that's why you eyeball each
+`[Photos] X dry-run` before merging: a wrong pick lands in a different **date cluster** in the album,
+easy to spot and remove. Names that return **no** match are logged `–  not in GP search` and collected
+in **`gp-manual-review.txt`** (those either have a different name in GP or were never uploaded).
 
 ---
 
 **If it stops/misbehaves:** paste me the console line + the `shots/*.png` and I'll fix the selector.
-**Flags:** `--only "<name>"`, `--limit <N>`, `--headful-slow`, `--skip-ambiguous`, env `CDP_URL` (default `http://localhost:9222`).
+**Flags:** `--only "<name>"`, `--limit <N>`, `--headful-slow`, env `CDP_URL` (default `http://localhost:9222`).
 
 **Why CDP and not just a Playwright-launched Chrome?** Google flags automation-launched browsers
 (`navigator.webdriver`, Chrome-for-Testing build) and blocks sign-in. Attaching to your real,

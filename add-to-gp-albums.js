@@ -17,15 +17,12 @@
  *   node add-to-gp-albums.js --only "Contributor One"     # tests create + add-to-existing
  *   node add-to-gp-albums.js --limit 3            # stop after N additions (testing)
  *   node add-to-gp-albums.js --headful-slow       # extra slow-mo to watch/debug
- *   node add-to-gp-albums.js --skip-ambiguous     # flag multi-match files instead of adding a best-guess
  *
  * Safety: writes ONLY to "[Photos] X dry-run" albums. Resumable (progress file).
  * Throttled. Saves an error screenshot per failure and continues.
- * Ambiguity guard: if a filename matches >1 DIFFERENT photo in GP (e.g. DSC_0059.JPG,
- * MOVIE.mp4), by DEFAULT the most-relevant match is still ADDED but flagged "verify" (wrong
- * picks cluster by date in the dry-run album = easy to spot + delete; right picks save you the
- * manual add). Use --skip-ambiguous to flag WITHOUT adding. Every ambiguous + not-found file is
- * listed in gp-manual-review.txt to resolve by hand.
+ * Multiple matches: if a filename matches several different photos in GP (e.g. DSC_0059.JPG), the
+ * most-relevant match is added (best guess) — review each dry-run album by eye before merging;
+ * wrong picks cluster by date, easy to spot + remove. Not-found files go to gp-manual-review.txt.
  * --------------------------------------------------------------------------
  */
 const { chromium } = require('playwright');
@@ -42,7 +39,6 @@ const args  = process.argv.slice(2);
 const only  = args.includes('--only')  ? args[args.indexOf('--only')  + 1] : null;
 const limit = args.includes('--limit') ? parseInt(args[args.indexOf('--limit') + 1], 10) : Infinity;
 const slowMo = args.includes('--headful-slow') ? 250 : 60;
-const skipAmbiguous = args.includes('--skip-ambiguous'); // default: ADD GP's best match + flag it
 
 const sleep  = ms => new Promise(r => setTimeout(r, ms));
 const jitter = (a, b) => Math.round(a + Math.random() * (b - a));
@@ -54,9 +50,9 @@ const MOD = process.platform === 'darwin' ? 'Meta' : 'Control';
   const progress = fs.existsSync(PROGRESS) ? JSON.parse(fs.readFileSync(PROGRESS, 'utf8')) : {};
   const save = () => fs.writeFileSync(PROGRESS, JSON.stringify(progress, null, 1));
 
-  // Ctrl+C: still flush progress + the ambiguous-review list before quitting.
+  // Ctrl+C: still flush progress + the not-found review list before quitting.
   process.on('SIGINT', () => {
-    console.log('\n[interrupted] saving progress + ambiguous review…');
+    console.log('\n[interrupted] saving progress + review list…');
     try { save(); writeManualReview(progress, data); } catch {}
     process.exit(130);
   });
@@ -85,35 +81,25 @@ const MOD = process.platform === 'darwin' ? 'Meta' : 'Control';
   await ensureLoggedIn(page);
   // NOTE: never browser.close() — it's your real Chrome.
 
-  let added = 0, addedAmbiguous = 0, skippedAmbiguous = 0;
+  let added = 0;
   for (const name of names) {
     const album = data[name].dryrun_album;
-    progress[name]                = progress[name] || {};
-    progress[name].done           = progress[name].done           || [];
-    progress[name].notFound       = progress[name].notFound       || [];
-    progress[name].ambiguous      = progress[name].ambiguous      || [];   // >1 GP match -> verify
-    progress[name].ambiguousN     = progress[name].ambiguousN     || {};   // filename -> #matches
-    progress[name].ambiguousAdded = progress[name].ambiguousAdded || {};   // filename -> best-guess added?
+    progress[name]          = progress[name] || {};
+    progress[name].done     = progress[name].done     || [];
+    progress[name].notFound = progress[name].notFound || [];
     console.log(`\n=== ${name}  ->  "${album}"  (${data[name].count} photos) ===`);
     for (const filename of data[name].filenames) {
       if (added >= limit) { console.log('Reached --limit.'); save(); writeManualReview(progress, data); return; }
       if (progress[name].done.includes(filename) ||
-          progress[name].notFound.includes(filename) ||
-          progress[name].ambiguous.includes(filename)) continue;
+          progress[name].notFound.includes(filename)) continue;
       try {
         const r = await addOne(page, filename, album);
         if (r === 'notfound') {
           progress[name].notFound.push(filename);
           console.log(`  –  not in GP search: ${filename}`);
-        } else if (r && r.status === 'ambiguous') {
-          progress[name].ambiguous.push(filename);
-          progress[name].ambiguousN[filename] = r.n;
-          progress[name].ambiguousAdded[filename] = !!r.added;
-          if (r.added) { added++; addedAmbiguous++; console.log(`  +? added BEST-GUESS (${r.n} matches — verify): ${filename}`); }
-          else         { skippedAmbiguous++;        console.log(`  ?  AMBIGUOUS (${r.n} matches) — skipped:          ${filename}`); }
         } else {
           progress[name].done.push(filename); added++;
-          console.log(`  +  added:            ${filename}`);
+          console.log(`  +  added:  ${filename}`);
         }
         save();
       } catch (e) {
@@ -125,8 +111,8 @@ const MOD = process.platform === 'darwin' ? 'Meta' : 'Control';
     }
   }
   writeManualReview(progress, data);
-  console.log(`\nDone this run. Added ${added} (incl. ${addedAmbiguous} ambiguous best-guesses), skipped-ambiguous ${skippedAmbiguous}. Progress: ${PROGRESS}.`);
-  console.log(`Needs-manual-attention list (verify auto-added + not-found): ${path.join(__dirname, 'gp-manual-review.txt')}`);
+  console.log(`\nDone this run. Added ${added}. Progress: ${PROGRESS}.`);
+  console.log(`Not-found list (need manual handling): ${path.join(__dirname, 'gp-manual-review.txt')}`);
   console.log('Browser left open for review.');
 })();
 
@@ -151,25 +137,18 @@ async function addOne(page, filename, album) {
   await page.keyboard.type(`"${filename}"`, { delay: 8 });
   await page.keyboard.press('Enter');
 
-  // Make sure the search actually navigated (URL -> /search/...) before reading results: right after
-  // goto() the main library is still on screen, and counting THOSE tiles is what made DSC_0006 look
-  // like "32 matches". Then wait for the results grid to truly render (or a genuine "No results").
+  // Wait for the search to actually navigate (URL -> /search/...) and the results grid to render,
+  // or a genuine "No results". GP transiently shows an empty/"No results" state while loading, so we
+  // never conclude "not found" until results are really absent (that false-negative bit us before).
   await page.waitForURL(/\/search\//, { timeout: 8000 }).catch(() => {});
   const total = await waitForResults(page);
   if (!total) return 'notfound';
 
-  // AMBIGUITY GUARD: a filename like DSC_0059.JPG / MOVIE.mp4 can match several DIFFERENT photos.
-  // GP duplicates tiles across a "Most relevant" strip + dated groups, so we count DISTINCT photos
-  // (by media key). >1 distinct => don't guess which one; flag it for your manual review instead.
-  const m = await analyzeMatches(page);
-  const isAmbiguous = (m.unique > 1 || (m.multiUI && m.unique !== 1));
-  // Default: still ADD GP's most-relevant match (right ones get auto-added; wrong ones land in a
-  // different date-cluster in the dry-run album = easy to spot + remove) but FLAG it for verification.
-  // With --skip-ambiguous: don't add, just flag.
-  if (isAmbiguous && skipAmbiguous) return { status: 'ambiguous', n: m.unique || m.raw, added: false };
-
-  // select GP's first (most-relevant) match — robust: settle, hover-reveal the checkbox, retry,
-  // and back out if a click accidentally opens the photo instead of selecting it.
+  // Select GP's first (most-relevant) match and add it. If a filename matches several different
+  // photos (DSC_0059.JPG etc.), this adds the best guess — wrong picks land in a different date
+  // cluster in the dry-run album, easy to spot + remove on review. (We don't try to auto-detect
+  // ambiguity: GP leaves the whole library grid in the page DOM behind the results, so a reliable
+  // match count isn't possible from the page — and a counter that flags everything is just noise.)
   if (!(await selectFirstPhoto(page))) throw new Error('could not select the photo (checkbox never registered)');
 
   // "+" (Add to) -> "Album"
@@ -203,7 +182,7 @@ async function addOne(page, filename, album) {
     ]);
   }
   await sleep(1500);
-  return isAmbiguous ? { status: 'ambiguous', n: m.unique || m.raw, added: true } : 'added';
+  return 'added';
 }
 
 // Select the first result via its hover-checkbox (top-left corner of the tile). Instead of fixed
@@ -269,80 +248,38 @@ async function clickOption(page, locator) {
   await locator.click({ force: true });
 }
 
-// Wait until the search results grid actually renders (>=1 photo tile) or GP genuinely shows
-// "No results". CRITICAL: never conclude 0 just because the grid hasn't painted yet — GP transiently
-// shows an empty / "No results" state while loading, and treating that as "no match" caused false
-// "not in GP" misses on photos that were really there. Once photos appear, let the count settle so
-// the ambiguity check is accurate. Returns the settled count (0 => truly none).
+// Wait until search results render (>=1 photo) or GP genuinely shows "No results". CRITICAL: never
+// conclude 0 just because the grid hasn't painted yet — GP transiently shows an empty / "No results"
+// state while loading, and treating that as "no match" caused false "not in GP" misses. Returns 1
+// (results present) or 0 (truly none). selectFirstPhoto settles the tile position itself.
 async function waitForResults(page) {
   const tiles = () => page.getByRole('link', { name: /^Photo/ }).count();
-  for (let i = 0; i < 20; i++) {              // up to ~12s for results to load
-    const n = await tiles();
-    if (n > 0) {                              // photos present -> let the count stop growing
-      let stable = n;
-      for (let j = 0; j < 6; j++) {
-        await sleep(300);
-        const n2 = await tiles();
-        if (n2 === stable) return stable;     // two equal reads => settled (min ~300ms)
-        stable = n2;
-      }
-      return stable;
-    }
+  for (let i = 0; i < 20; i++) {                                        // up to ~10s for results
+    if (await tiles() > 0) return 1;
     if (i >= 5 && await page.getByText('No results').count()) return 0; // genuinely none (after ~3s)
-    await sleep(600);
+    await sleep(500);
   }
   return 0;
 }
 
-// How many DISTINCT photos match the current search? GP repeats the SAME photo across a
-// "Most relevant to your search" strip and the dated groups, so we dedupe tiles by their stable
-// media key (the AF1Qip… token in href/jslog, else the per-photo aria-label). multiUI = GP showed
-// its multi-result ranking header (a strong "more than one match" signal on its own).
-async function analyzeMatches(page) {
-  return await page.evaluate(() => {
-    const tiles = Array.from(document.querySelectorAll('a[aria-label^="Photo"], a[href*="/photo/"]'));
-    const keys = new Set();
-    for (const a of tiles) {
-      const hay = (a.getAttribute('href') || '') + '|' +
-                  (a.getAttribute('aria-label') || '') + '|' +
-                  (a.getAttribute('data-id') || '') + '|' +
-                  (a.getAttribute('jslog') || '');
-      const tok = hay.match(/AF1Qip[\w-]+/) || hay.match(/[A-Za-z0-9_-]{22,}/);
-      keys.add(tok ? tok[0] : hay);
-    }
-    const multiUI = /Most relevant to your search/i.test(document.body.innerText || '');
-    return { raw: tiles.length, unique: keys.size, multiUI };
-  });
-}
-
-// One human-friendly list of everything needing a manual look: AMBIGUOUS (>1 GP match) and
-// NOT-FOUND (0 GP matches). So every file the script couldn't safely auto-add is in one place.
+// List the NOT-FOUND files (quoted-filename search returned nothing) so you can handle them by hand.
 function writeManualReview(progress, data) {
   const body = [];
-  let ambT = 0, nfT = 0;
+  let nfT = 0;
   for (const name of Object.keys(progress)) {
-    const amb = progress[name].ambiguous || [];
-    const nf  = progress[name].notFound  || [];
-    if (!amb.length && !nf.length) continue;
-    const album   = data[name] ? data[name].dryrun_album : '';
-    const addedMap = progress[name].ambiguousAdded || {};
-    const nMap     = progress[name].ambiguousN || {};
+    const nf = progress[name].notFound || [];
+    if (!nf.length) continue;
+    const album = data[name] ? data[name].dryrun_album : '';
     body.push(`## ${name}  ->  "${album}"`);
-    for (const f of amb) {
-      const tag = addedMap[f] ? 'VERIFY auto-added' : 'ADD manually';
-      body.push(`   [${tag}: ${nMap[f] || '?'} matches]  ${f}`);
-    }
-    for (const f of nf)  body.push(`   [not found in GP]                ${f}`);
+    for (const f of nf) body.push(`   ${f}`);
     body.push('');
-    ambT += amb.length; nfT += nf.length;
+    nfT += nf.length;
   }
   const head = [
-    `NEEDS MANUAL ATTENTION — ${ambT} ambiguous + ${nfT} not-found file(s).`,
-    'VERIFY auto-added = the best (most-relevant) GP match WAS added; open the dry-run album and confirm',
-    '   it is really this person\'s photo. If it is the wrong one (usually a different date cluster), remove',
-    '   it and search the quoted "filename" to add the correct match.',
-    'ADD manually    = nothing was added (you ran with --skip-ambiguous); search + add it yourself.',
-    'not found       = the quoted-filename search returned nothing (different name in GP, or not uploaded).',
+    `NOT FOUND IN GOOGLE PHOTOS — ${nfT} file(s) whose quoted-filename search returned nothing.`,
+    '(Either the file has a different name in GP, or it was never uploaded.)',
+    'Handle each by hand: search the quoted "filename"; if you find it, add it to the dry-run album;',
+    'if not, it belongs to the separate "upload to GP" set.',
     '',
   ];
   try { fs.writeFileSync(path.join(__dirname, 'gp-manual-review.txt'), head.concat(body).join('\n')); } catch {}
