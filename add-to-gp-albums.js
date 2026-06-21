@@ -100,12 +100,14 @@ const MOVING = /\.(mp4|mov|m4v|3gp|3g2|avi|mkv|webm|wmv|flv|mpg|mpeg|mts|m2ts|in
     progress[name].done     = progress[name].done     || [];
     progress[name].notFound = progress[name].notFound || [];
     progress[name].skipped  = progress[name].skipped  || [];   // videos/GIFs -> add by hand
+    progress[name].failed   = progress[name].failed   || [];   // errored -> recorded, handle by hand
     console.log(`\n[${ts()}] === ${name}  ->  "${album}"  (${data[name].count} photos) ===`);
     for (const filename of data[name].filenames) {
       if (added >= limit) { console.log('Reached --limit.'); save(); writeManualReview(progress, data); return; }
       if (progress[name].done.includes(filename) ||
           progress[name].notFound.includes(filename) ||
-          progress[name].skipped.includes(filename)) continue;
+          progress[name].skipped.includes(filename) ||
+          progress[name].failed.includes(filename)) continue;
       if (MOVING.test(filename)) {                              // video/GIF -> skip, list for manual add
         progress[name].skipped.push(filename); save();
         console.log(`  [${ts()}]  ⊘  skipped (video/GIF — add manually): ${filename}`);
@@ -122,17 +124,17 @@ const MOVING = /\.(mp4|mov|m4v|3gp|3g2|avi|mkv|webm|wmv|flv|mpg|mpeg|mts|m2ts|in
         }
         save();
       } catch (e) {
+        progress[name].failed.push(filename); save();   // record so it shows up + isn't retried each run
         const shot = path.join(SHOTS, `${name}__${filename.replace(/[^\w.-]/g, '_')}.png`);
         try { await page.screenshot({ path: shot }); } catch {}
-        console.log(`  [${ts()}]  !  ERROR ${filename}: ${e.message}\n     screenshot -> ${shot}`);
+        console.log(`  [${ts()}]  !  ERROR (recorded) ${filename}: ${e.message}\n     screenshot -> ${shot}`);
       }
       await sleep(jitter(700, 1600)); // throttle (be polite, avoid rate-limit)
     }
   }
   writeManualReview(progress, data);
-  const skTot = Object.values(progress).reduce((s, v) => s + (v.skipped  || []).length, 0);
-  const nfTot = Object.values(progress).reduce((s, v) => s + (v.notFound || []).length, 0);
-  console.log(`\n[${ts()}] Done this run. Added ${added} this run. Manual-attention totals: ${skTot} video/GIF skipped, ${nfTot} not-found.`);
+  const tot = k => Object.values(progress).reduce((s, v) => s + (v[k] || []).length, 0);
+  console.log(`\n[${ts()}] Done this run. Added ${added} this run. Manual-attention totals: ${tot('skipped')} video/GIF skipped, ${tot('failed')} errored, ${tot('notFound')} not-found.`);
   console.log(`Manual list: ${path.join(__dirname, 'gp-manual-review.txt')}  ·  Progress: ${PROGRESS}.`);
   console.log('Browser left open for review.');
 })();
@@ -256,8 +258,9 @@ async function clickAddTo(page) {
     () => page.getByLabel(/add to/i).first().click({ timeout: 2500 }),
   ];
   for (const t of tries) { try { await t(); return; } catch {} }
-  // fallback: "+" is in the top-right icon cluster
-  const vw = page.viewportSize().width;
+  // fallback: "+" is in the top-right icon cluster. viewportSize() is null on CDP-attached real
+  // Chrome, so read the width from the page instead (that null was the "reading 'width'" crash).
+  const vw = await page.evaluate(() => window.innerWidth).catch(() => 1280);
   await page.mouse.click(vw - 116, 24);
 }
 
@@ -293,25 +296,29 @@ async function waitForResults(page) {
   return 0;
 }
 
-// List the NOT-FOUND files (quoted-filename search returned nothing) so you can handle them by hand.
+// List everything needing a hand — skipped videos/GIFs, errored files, and not-found — by contributor.
 function writeManualReview(progress, data) {
   const body = [];
-  let nfT = 0, skT = 0;
+  let nfT = 0, skT = 0, faT = 0;
   for (const name of Object.keys(progress)) {
     const nf = progress[name].notFound || [];
     const sk = progress[name].skipped  || [];
-    if (!nf.length && !sk.length) continue;
+    const fa = progress[name].failed   || [];
+    if (!nf.length && !sk.length && !fa.length) continue;
     const album = data[name] ? data[name].dryrun_album : '';
     body.push(`## ${name}  ->  "${album}"`);
     for (const f of sk) body.push(`   [video/GIF — add manually] ${f}`);
+    for (const f of fa) body.push(`   [errored — add manually]   ${f}`);
     for (const f of nf) body.push(`   [not found in GP]          ${f}`);
     body.push('');
-    nfT += nf.length; skT += sk.length;
+    nfT += nf.length; skT += sk.length; faT += fa.length;
   }
   const head = [
-    `MANUAL ATTENTION — ${skT} video/GIF skipped + ${nfT} not-found.`,
+    `MANUAL ATTENTION — ${skT} video/GIF skipped + ${faT} errored + ${nfT} not-found.`,
     'video/GIF  = intentionally skipped (videos & animations/Creations need manual adding); search the',
     '             quoted "filename" in GP, pick it, add to its dry-run album.',
+    'errored    = the script could not select/add it (GP quirk, e.g. stacked photos); add it by hand.',
+    '             Remove it from progress.failed if you want a re-run to retry it.',
     'not found  = quoted-filename search returned nothing (different name in GP, or never uploaded; the',
     '             latter belong to the separate "upload to GP" set).',
     '',
