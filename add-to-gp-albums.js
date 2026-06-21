@@ -22,7 +22,10 @@
  * Throttled. Saves an error screenshot per failure and continues.
  * Multiple matches: if a filename matches several different photos in GP (e.g. DSC_0059.JPG), the
  * most-relevant match is added (best guess) — review each dry-run album by eye before merging;
- * wrong picks cluster by date, easy to spot + remove. Not-found files go to gp-manual-review.txt.
+ * wrong picks cluster by date, easy to spot + remove.
+ * Videos & GIFs/animations (incl. Google Photos "Creations") are SKIPPED automatically (their tiles
+ * can't be reliably checkbox-selected) and listed in gp-manual-review.txt for manual adding — along
+ * with not-found files. Photos are the script's job; moving images are yours.
  * --------------------------------------------------------------------------
  */
 const { chromium } = require('playwright');
@@ -48,6 +51,9 @@ const ts     = () => new Date().toTimeString().slice(0, 8);   // HH:MM:SS prefix
 const withTimeout = (p, ms) =>
   Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(`item timeout after ${ms / 1000}s`)), ms))]);
 const MOD = process.platform === 'darwin' ? 'Meta' : 'Control';
+// Videos and GIFs/animations (incl. Google Photos "Creations") have tile UIs the checkbox-select can't
+// reliably hit (center play button / sparkles). We SKIP them and list them for manual adding.
+const MOVING = /\.(mp4|mov|m4v|3gp|3g2|avi|mkv|webm|wmv|flv|mpg|mpeg|mts|m2ts|insv|gif)$/i;
 
 (async () => {
   if (!fs.existsSync(SHOTS)) fs.mkdirSync(SHOTS, { recursive: true });
@@ -93,11 +99,18 @@ const MOD = process.platform === 'darwin' ? 'Meta' : 'Control';
     progress[name]          = progress[name] || {};
     progress[name].done     = progress[name].done     || [];
     progress[name].notFound = progress[name].notFound || [];
+    progress[name].skipped  = progress[name].skipped  || [];   // videos/GIFs -> add by hand
     console.log(`\n[${ts()}] === ${name}  ->  "${album}"  (${data[name].count} photos) ===`);
     for (const filename of data[name].filenames) {
       if (added >= limit) { console.log('Reached --limit.'); save(); writeManualReview(progress, data); return; }
       if (progress[name].done.includes(filename) ||
-          progress[name].notFound.includes(filename)) continue;
+          progress[name].notFound.includes(filename) ||
+          progress[name].skipped.includes(filename)) continue;
+      if (MOVING.test(filename)) {                              // video/GIF -> skip, list for manual add
+        progress[name].skipped.push(filename); save();
+        console.log(`  [${ts()}]  ⊘  skipped (video/GIF — add manually): ${filename}`);
+        continue;
+      }
       try {
         const r = await withTimeout(addOne(page, filename, album), 75000); // never hang on one item
         if (r === 'notfound') {
@@ -117,8 +130,10 @@ const MOD = process.platform === 'darwin' ? 'Meta' : 'Control';
     }
   }
   writeManualReview(progress, data);
-  console.log(`\n[${ts()}] Done this run. Added ${added}. Progress: ${PROGRESS}.`);
-  console.log(`Not-found list (need manual handling): ${path.join(__dirname, 'gp-manual-review.txt')}`);
+  const skTot = Object.values(progress).reduce((s, v) => s + (v.skipped  || []).length, 0);
+  const nfTot = Object.values(progress).reduce((s, v) => s + (v.notFound || []).length, 0);
+  console.log(`\n[${ts()}] Done this run. Added ${added} this run. Manual-attention totals: ${skTot} video/GIF skipped, ${nfTot} not-found.`);
+  console.log(`Manual list: ${path.join(__dirname, 'gp-manual-review.txt')}  ·  Progress: ${PROGRESS}.`);
   console.log('Browser left open for review.');
 })();
 
@@ -281,21 +296,24 @@ async function waitForResults(page) {
 // List the NOT-FOUND files (quoted-filename search returned nothing) so you can handle them by hand.
 function writeManualReview(progress, data) {
   const body = [];
-  let nfT = 0;
+  let nfT = 0, skT = 0;
   for (const name of Object.keys(progress)) {
     const nf = progress[name].notFound || [];
-    if (!nf.length) continue;
+    const sk = progress[name].skipped  || [];
+    if (!nf.length && !sk.length) continue;
     const album = data[name] ? data[name].dryrun_album : '';
     body.push(`## ${name}  ->  "${album}"`);
-    for (const f of nf) body.push(`   ${f}`);
+    for (const f of sk) body.push(`   [video/GIF — add manually] ${f}`);
+    for (const f of nf) body.push(`   [not found in GP]          ${f}`);
     body.push('');
-    nfT += nf.length;
+    nfT += nf.length; skT += sk.length;
   }
   const head = [
-    `NOT FOUND IN GOOGLE PHOTOS — ${nfT} file(s) whose quoted-filename search returned nothing.`,
-    '(Either the file has a different name in GP, or it was never uploaded.)',
-    'Handle each by hand: search the quoted "filename"; if you find it, add it to the dry-run album;',
-    'if not, it belongs to the separate "upload to GP" set.',
+    `MANUAL ATTENTION — ${skT} video/GIF skipped + ${nfT} not-found.`,
+    'video/GIF  = intentionally skipped (videos & animations/Creations need manual adding); search the',
+    '             quoted "filename" in GP, pick it, add to its dry-run album.',
+    'not found  = quoted-filename search returned nothing (different name in GP, or never uploaded; the',
+    '             latter belong to the separate "upload to GP" set).',
     '',
   ];
   try { fs.writeFileSync(path.join(__dirname, 'gp-manual-review.txt'), head.concat(body).join('\n')); } catch {}
