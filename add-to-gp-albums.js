@@ -30,15 +30,16 @@ const fs = require('fs');
 const path = require('path');
 
 // ---- config ----
-const DATA     = '/Users/user/Pictures/Photos/z-PROJECT/gp_album_additions.json';
-const PROFILE  = path.join(__dirname, 'gp-profile');         // persistent login (created on first run)
-const PROGRESS = path.join(__dirname, 'gp-add-progress.json');
-const SHOTS    = path.join(__dirname, 'shots');
-
 const args  = process.argv.slice(2);
 const only  = args.includes('--only')  ? args[args.indexOf('--only')  + 1] : null;
 const limit = args.includes('--limit') ? parseInt(args[args.indexOf('--limit') + 1], 10) : Infinity;
 const slowMo = args.includes('--headful-slow') ? 250 : 60;
+// --data lets us point at a different list (e.g. the videos file) without editing the script.
+const DATA     = args.includes('--data') ? args[args.indexOf('--data') + 1]
+                                         : '/Users/user/Pictures/Photos/z-PROJECT/gp_album_additions.json';
+const PROFILE  = path.join(__dirname, 'gp-profile');         // persistent login (created on first run)
+const PROGRESS = path.join(__dirname, 'gp-add-progress.json');
+const SHOTS    = path.join(__dirname, 'shots');
 
 const sleep  = ms => new Promise(r => setTimeout(r, ms));
 const jitter = (a, b) => Math.round(a + Math.random() * (b - a));
@@ -198,25 +199,36 @@ async function addOne(page, filename, album) {
 // We never try to "recover" by pressing Escape / going back — that's exactly what jumped to home.
 async function selectFirstPhoto(page) {
   const onResults = () => page.url().includes('/search/') && !page.url().includes('/photo/');
-  const photo = page.getByRole('link', { name: /^Photo/ }).first();
+  const link = page.getByRole('link', { name: /^Photo/ }).first();
   const selected = page.getByText(/\b\d+ selected\b/).first();
   for (let attempt = 0; attempt < 3; attempt++) {
     if (!onResults()) return false;                                  // never act off the results grid
-    // poll until the tile's position is stable (fast when already settled), so we hit the checkbox
-    let b = null, prev = null;
-    for (let i = 0; i < 8; i++) {
-      if (!onResults()) return false;
-      b = await photo.boundingBox().catch(() => null);
-      if (b && prev && Math.abs(b.x - prev.x) < 2 && Math.abs(b.y - prev.y) < 2) break;
-      prev = b;
-      await sleep(200);
+
+    // PRIMARY: click the result's own selection checkbox ELEMENT. GP renders a div[role="checkbox"]
+    // whose aria-label == the photo's label; clicking it selects reliably for photos AND videos (the
+    // checkbox is separate from a video's center play button). Selector found via inspect-gp-tile.js.
+    let label = null;
+    try {
+      await link.scrollIntoViewIfNeeded({ timeout: 3000 });
+      await link.hover({ timeout: 3000 });                          // reveal the checkbox
+      label = await link.getAttribute('aria-label');
+    } catch {}
+    if (label && onResults()) {
+      const cb = page.getByRole('checkbox', { name: label, exact: true }).first();
+      try { await cb.click({ timeout: 3000 }); await selected.waitFor({ timeout: 2500 }); return onResults(); } catch {}
     }
-    if (!b) { await sleep(300); continue; }
-    await page.mouse.move(b.x + 16, b.y + 16);   // hover the checkbox area (top-left) — NOT the center,
-    await sleep(300);                            // which on a video is the play button (opens the video)
-    await page.mouse.click(b.x + 16, b.y + 16);  // click the checkmark
-    try { await selected.waitFor({ timeout: 2000 }); return onResults(); } catch {}
-    if (!onResults()) return false;              // the click opened the viewer / left the grid -> bail
+    if (!onResults()) return false;
+
+    // FALLBACK: pixel-click the checkmark at the tile's top-left (proven for photos), top-left so we
+    // never hit a video's center play button.
+    const b = await link.boundingBox().catch(() => null);
+    if (b) {
+      await page.mouse.move(b.x + 16, b.y + 16);
+      await sleep(300);
+      await page.mouse.click(b.x + 16, b.y + 16);
+      try { await selected.waitFor({ timeout: 2000 }); return onResults(); } catch {}
+    }
+    if (!onResults()) return false;              // a click opened the viewer / left the grid -> bail
     await sleep(300);
   }
   return false;
