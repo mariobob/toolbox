@@ -1,6 +1,7 @@
 .DS_Store
 
-# add-to-gp-albums.js — runtime / generated (not source)
+# add-to-gp-albums.js — runtime / generated / user data (not source)
+gp-album-additions-manifest.json
 gp-add-progress.json
 gp-add-progress.backup-*.json
 gp-manual-review.txt

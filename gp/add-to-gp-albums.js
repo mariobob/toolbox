@@ -9,19 +9,21 @@
  * Why this way: Google killed the personal Photos API and removed AND/OR search,
  * so the only path is driving the web UI, one exact-filename search at a time.
  *
- * Setup:  npm i playwright  &&  npx playwright install chromium
+ * Setup:  cd gp && npm install      (installs playwright; no browser download — attaches to your Chrome over CDP)
  *
  * Run (one pass, smallest contributor first; photos AND videos come from one manifest):
  *   node add-to-gp-albums.js                            # everyone
  *   node add-to-gp-albums.js --only "Contributor Name"  # one contributor (testing)
  *   node add-to-gp-albums.js --limit 3                  # stop after N additions (testing)
  *
- * One manifest holds both photos and videos; each filename is routed by extension (the MOVING regex):
- *   data  <- gp_album_additions.json (under ~/Pictures/Photos/z-PROJECT)  ·  progress -> gp-add-progress.json
- *   review -> gp-manual-review.txt
- * Photos search "Photo – …" result tiles; videos search "Video – …" tiles, are checkbox-selected and
- * added, and a .MP4 that surfaces as a motion-photo still (or nothing) is flagged for manual handling,
- * never wrong-added.
+ * File paths default next to this script and are overridable per run:
+ *   --manifest <file>  input list      (default: gp-album-additions-manifest.json)
+ *   --progress <file>  resumable state (default: gp-add-progress.json)
+ *   --review   <file>  manual list     (default: gp-manual-review.txt)
+ * The manifest is { contributor -> { real_album, dryrun_album, count, filenames } } holding both photos
+ * and videos; each filename is routed by extension (the MOVING regex). Photos search "Photo – …" result
+ * tiles; videos search "Video – …" tiles, are checkbox-selected and added, and a .MP4 that surfaces as a
+ * motion-photo still (or nothing) is flagged for manual handling, never wrong-added.
  *
  * Safety: writes ONLY to "[Photos] X dry-run" albums. Resumable (progress file).
  * Throttled. Saves an error screenshot per failure and continues.
@@ -32,20 +34,25 @@
  */
 const { chromium } = require('playwright');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 
 // ---- config ----
-const args  = process.argv.slice(2);
-const only  = args.includes('--only')  ? args[args.indexOf('--only')  + 1] : null;
-const limit = args.includes('--limit') ? parseInt(args[args.indexOf('--limit') + 1], 10) : Infinity;
-const SHOTS    = path.join(__dirname, 'shots');
-// One manifest of {contributor -> {real_album, dryrun_album, count, filenames}} holding photos AND
-// videos. Each filename is routed at run time by the MOVING regex: photos select "Photo – …" result
-// tiles, videos select "Video – …" tiles (+ motion-photo guard). Username-free via os.homedir().
-const MANIFEST = path.join(os.homedir(), 'Pictures/Photos/z-PROJECT/gp_album_additions.json');
-const PROGRESS = path.join(__dirname, 'gp-add-progress.json');
-const REVIEW   = path.join(__dirname, 'gp-manual-review.txt');
+const args   = process.argv.slice(2);
+const argVal = flag => args.includes(flag) ? args[args.indexOf(flag) + 1] : null;
+const only   = argVal('--only');
+const limit  = args.includes('--limit') ? parseInt(argVal('--limit'), 10) : Infinity;
+const SHOTS  = path.join(__dirname, 'shots');
+// File paths default next to this script and are overridable per run, so the tool is portable:
+//   --manifest <file>  input list: { contributor -> { real_album, dryrun_album, count, filenames } },
+//                      holding photos AND videos (each filename routed photo/video by the MOVING regex)
+//   --progress <file>  resumable run state (which files are done/failed/notFound/…)
+//   --review   <file>  human-readable list of items that still need a manual hand
+const DEFAULT_MANIFEST = path.join(__dirname, 'gp-album-additions-manifest.json');
+const DEFAULT_PROGRESS = path.join(__dirname, 'gp-add-progress.json');
+const DEFAULT_REVIEW   = path.join(__dirname, 'gp-manual-review.txt');
+const MANIFEST = argVal('--manifest') || DEFAULT_MANIFEST;
+const PROGRESS = argVal('--progress') || DEFAULT_PROGRESS;
+const REVIEW   = argVal('--review')   || DEFAULT_REVIEW;
 
 const sleep  = ms => new Promise(r => setTimeout(r, ms));
 const jitter = (a, b) => Math.round(a + Math.random() * (b - a));
@@ -73,6 +80,10 @@ const MOVING = /\.(mp4|mov|m4v|3gp|3g2|avi|mkv|webm|wmv|flv|mpg|mpeg|mts|m2ts|in
 
 (async () => {
   if (!fs.existsSync(SHOTS)) fs.mkdirSync(SHOTS, { recursive: true });
+  if (!fs.existsSync(MANIFEST)) {
+    console.error(`Manifest not found: ${MANIFEST}\nPass --manifest <path>, or place your list at that default. See the README/SETUP for the JSON format.`);
+    process.exit(1);
+  }
   const data = JSON.parse(fs.readFileSync(MANIFEST, 'utf8'));
   const progress = fs.existsSync(PROGRESS) ? JSON.parse(fs.readFileSync(PROGRESS, 'utf8')) : {};
   const save = () => fs.writeFileSync(PROGRESS, JSON.stringify(progress, null, 1));
