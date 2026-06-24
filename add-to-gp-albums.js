@@ -35,6 +35,7 @@
  */
 const { chromium } = require('playwright');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 // ---- config ----
@@ -50,11 +51,11 @@ const SHOTS    = path.join(__dirname, 'shots');
 // motion-photo stills instead of wrong-adding. Kept on separate files so neither can clobber the other.
 const TRACKS = [
   { kind: 'photo', isVideo: false, tileRe: /^Photo/,
-    dataPath:     '/Users/user/Pictures/Photos/z-PROJECT/gp_album_additions.json',
+    dataPath:     path.join(os.homedir(), 'Pictures/Photos/z-PROJECT/gp_album_additions.json'),
     progressPath: path.join(__dirname, 'gp-add-progress.json'),
     reviewPath:   path.join(__dirname, 'gp-manual-review.txt') },
   { kind: 'video', isVideo: true,  tileRe: /^Video/,
-    dataPath:     '/Users/user/Pictures/Photos/z-PROJECT/gp_album_additions_videos.json',
+    dataPath:     path.join(os.homedir(), 'Pictures/Photos/z-PROJECT/gp_album_additions_videos.json'),
     progressPath: path.join(__dirname, 'gp-add-progress-videos.json'),
     reviewPath:   path.join(__dirname, 'gp-manual-review-videos.txt') },
 ];
