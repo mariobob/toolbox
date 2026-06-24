@@ -2,8 +2,10 @@
 
 # add-to-gp-albums.js — runtime / generated (not source)
 gp-add-progress.json
+gp-add-progress-videos.json
 gp-add-progress.backup-*.json
 gp-manual-review.txt
+gp-manual-review-videos.txt
 gp-ambiguous-review.txt
 shots/
 gp-profile/
