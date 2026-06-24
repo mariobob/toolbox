@@ -9,13 +9,12 @@
  * Why this way: Google killed the personal Photos API and removed AND/OR search,
  * so the only path is driving the web UI, one exact-filename search at a time.
  *
- * Setup (already done):  npm i playwright  &&  npx playwright install chromium
+ * Setup:  npm i playwright  &&  npx playwright install chromium
  *
  * Run (one pass, smallest contributor first; photos AND videos come from one manifest):
- *   node add-to-gp-albums.js                      # everyone
- *   node add-to-gp-albums.js --only "Contributor Two"   # one contributor (TEST FIRST)
- *   node add-to-gp-albums.js --only "Contributor One"     # tests create + add-to-existing
- *   node add-to-gp-albums.js --limit 3            # stop after N additions (testing)
+ *   node add-to-gp-albums.js                            # everyone
+ *   node add-to-gp-albums.js --only "Contributor Name"  # one contributor (testing)
+ *   node add-to-gp-albums.js --limit 3                  # stop after N additions (testing)
  *
  * One manifest holds both photos and videos; each filename is routed by extension (the MOVING regex):
  *   data  <- gp_album_additions.json (under ~/Pictures/Photos/z-PROJECT)  ·  progress -> gp-add-progress.json

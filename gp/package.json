@@ -1,0 +1,12 @@
+{
+  "name": "gp-album-additions",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Add per-contributor photos & videos into Google Photos '[Photos] X dry-run' albums by exact-filename search, driving an already-logged-in Chrome over CDP.",
+  "scripts": {
+    "start": "node add-to-gp-albums.js"
+  },
+  "dependencies": {
+    "playwright": "^1.61.0"
+  }
+}
