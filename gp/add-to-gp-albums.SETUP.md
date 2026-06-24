@@ -32,7 +32,7 @@ Chrome (different profile) is unaffected — keep using it.
 ## 3. Run the script (another Terminal tab)
 
 ```bash
-cd /Users/user/workplace/personal/toolbox
+cd ~/workplace/personal/toolbox/gp
 
 node add-to-gp-albums.js --only "Contributor Three"   # TEST: 1 photo, creates the dry-run album
 node add-to-gp-albums.js --only "Contributor One"     # TEST: 2 photos, create + add-to-existing

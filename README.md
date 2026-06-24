@@ -48,7 +48,7 @@ Automatically reconnects Bluetooth devices.
 
 **Useful for:** Switching peripherals between computers (e.g. magic keyboard, trackpad, mouse, headphones).
 
-### add-to-gp-albums.js
-Adds your "missing from Google Photos person-album" photos into per-contributor `[Photos] X dry-run` albums via exact-filename search, by attaching (over CDP) to your real, already-logged-in Chrome — sidestepping Google's automation sign-in block. Resumable, throttled, writes only to dry-run albums. Setup + run steps in `add-to-gp-albums.SETUP.md`.
+### gp/add-to-gp-albums.js
+Adds your "missing from Google Photos person-album" photos **and videos** into per-contributor `[Photos] X dry-run` albums via exact-filename search, by attaching (over CDP) to your real, already-logged-in Chrome — sidestepping Google's automation sign-in block. Resumable, throttled, writes only to dry-run albums. All GP files live under `gp/`; setup + run steps in `gp/add-to-gp-albums.SETUP.md`.
 
 **Useful for:** Pushing your (more complete) local contributor organization into Google Photos person-albums now that the personal Photos API is dead.
