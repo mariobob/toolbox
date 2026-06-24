@@ -12,20 +12,28 @@
  * Setup (already done):  npm i playwright  &&  npx playwright install chromium
  *
  * Run:
- *   node add-to-gp-albums.js                      # all, smallest -> largest
+ *   node add-to-gp-albums.js                      # all photos, smallest -> largest
  *   node add-to-gp-albums.js --only "Contributor Three"   # one contributor (TEST FIRST)
  *   node add-to-gp-albums.js --only "Contributor One"     # tests create + add-to-existing
  *   node add-to-gp-albums.js --limit 3            # stop after N additions (testing)
  *   node add-to-gp-albums.js --headful-slow       # extra slow-mo to watch/debug
+ *
+ * VIDEOS: the same machinery adds videos too, via `--videos` (or the add-videos-to-gp-albums.js
+ * launcher, which just sets that flag). Video mode reads the videos manifest, uses video-aware result
+ * locators, and keeps its own progress + review files so it can't disturb a photo run:
+ *   node add-videos-to-gp-albums.js --only "Contributor Two"   # smallest video set (TEST FIRST)
+ *   node add-to-gp-albums.js --videos --only "Dino"         # equivalent, explicit flag
+ * Without --videos, behavior is byte-for-byte the original photo flow.
  *
  * Safety: writes ONLY to "[Photos] X dry-run" albums. Resumable (progress file).
  * Throttled. Saves an error screenshot per failure and continues.
  * Multiple matches: if a filename matches several different photos in GP (e.g. DSC_0059.JPG), the
  * most-relevant match is added (best guess) — review each dry-run album by eye before merging;
  * wrong picks cluster by date, easy to spot + remove.
- * Videos & GIFs/animations (incl. Google Photos "Creations") are SKIPPED automatically (their tiles
- * can't be reliably checkbox-selected) and listed in gp-manual-review.txt for manual adding — along
- * with not-found files. Photos are the script's job; moving images are yours.
+ * In PHOTO mode, videos & GIFs/animations (incl. Google Photos "Creations") are SKIPPED automatically
+ * and listed in gp-manual-review.txt for manual adding — along with not-found files. In VIDEO mode they
+ * ARE the job: each is searched, selected by its checkbox element, and added; a .MP4 that surfaces as a
+ * motion-photo still (or nothing) is flagged for manual handling, never wrong-added.
  * --------------------------------------------------------------------------
  */
 const { chromium } = require('playwright');
@@ -37,11 +45,19 @@ const args  = process.argv.slice(2);
 const only  = args.includes('--only')  ? args[args.indexOf('--only')  + 1] : null;
 const limit = args.includes('--limit') ? parseInt(args[args.indexOf('--limit') + 1], 10) : Infinity;
 const slowMo = args.includes('--headful-slow') ? 250 : 60;
-// --data lets us point at a different list (e.g. the videos file) without editing the script.
+// VIDEOS mode (set by --videos, or by the add-videos-to-gp-albums.js launcher): process video/GIF files
+// instead of skipping them, and use video-aware result locators (see "VIDEO MODE" notes below). When
+// this flag is absent the script behaves byte-for-byte like the original photo flow.
+const VIDEOS = args.includes('--videos');
+// --data lets us point at a different list without editing the script; in --videos mode it defaults to
+// the videos manifest instead of the photos one.
 const DATA     = args.includes('--data') ? args[args.indexOf('--data') + 1]
-                                         : '/Users/user/Pictures/Photos/z-PROJECT/gp_album_additions.json';
+               : VIDEOS ? '/Users/user/Pictures/Photos/z-PROJECT/gp_album_additions_videos.json'
+                        : '/Users/user/Pictures/Photos/z-PROJECT/gp_album_additions.json';
 const PROFILE  = path.join(__dirname, 'gp-profile');         // persistent login (created on first run)
-const PROGRESS = path.join(__dirname, 'gp-add-progress.json');
+// Separate progress + review files in video mode, so a video run can never corrupt the photo run's state.
+const PROGRESS = path.join(__dirname, VIDEOS ? 'gp-add-progress-videos.json' : 'gp-add-progress.json');
+const REVIEW   = path.join(__dirname, VIDEOS ? 'gp-manual-review-videos.txt' : 'gp-manual-review.txt');
 const SHOTS    = path.join(__dirname, 'shots');
 
 const sleep  = ms => new Promise(r => setTimeout(r, ms));
@@ -54,6 +70,19 @@ const MOD = process.platform === 'darwin' ? 'Meta' : 'Control';
 // Videos and GIFs/animations (incl. Google Photos "Creations") have tile UIs the checkbox-select can't
 // reliably hit (center play button / sparkles). We SKIP them and list them for manual adding.
 const MOVING = /\.(mp4|mov|m4v|3gp|3g2|avi|mkv|webm|wmv|flv|mpg|mpeg|mts|m2ts|insv|gif)$/i;
+
+// VIDEO MODE notes (verified read-only with inspect-gp-tile.js against a real result):
+//  • A video's VISIBLE search-result tile is labelled "Video – …" (photos are "Photo – …"); the hidden
+//    home-grid tiles that also linger in the DOM are the "Photo – …" ones with a 0×0 rect. So the
+//    result/locator regex MUST accept "Video", or every video would look like "not found".
+//  • Its selection checkbox is the same div[role="checkbox"].ckGgle whose aria-label == the tile label,
+//    sitting at the tile's TOP-LEFT — so the existing checkbox-element click + top-left pixel fallback
+//    select videos correctly (never the centre play button). No checkbox change needed.
+//  • Don't trust a "Video"/duration heuristic on the label: "…, 15:49:39" makes \d+:\d\d match the time.
+//    The clean discriminator is the "Video" vs "Photo" tile-label PREFIX.
+//  • Motion photos: a .MP4 that is the video half of a motion photo surfaces as a "Photo – …" still (or
+//    nothing). We never auto-add those — they're flagged 'motion' for manual handling.
+const TILE_RE = VIDEOS ? /^Video/ : /^Photo/;   // which result tiles this run drives/selects
 
 (async () => {
   if (!fs.existsSync(SHOTS)) fs.mkdirSync(SHOTS, { recursive: true });
@@ -99,16 +128,18 @@ const MOVING = /\.(mp4|mov|m4v|3gp|3g2|avi|mkv|webm|wmv|flv|mpg|mpeg|mts|m2ts|in
     progress[name]          = progress[name] || {};
     progress[name].done     = progress[name].done     || [];
     progress[name].notFound = progress[name].notFound || [];
-    progress[name].skipped  = progress[name].skipped  || [];   // videos/GIFs -> add by hand
+    progress[name].skipped  = progress[name].skipped  || [];   // videos/GIFs -> add by hand (photo runs)
     progress[name].failed   = progress[name].failed   || [];   // errored -> recorded, handle by hand
-    console.log(`\n[${ts()}] === ${name}  ->  "${album}"  (${data[name].count} photos) ===`);
+    progress[name].motion   = progress[name].motion   || [];   // .MP4 that surfaced as a still -> by hand
+    console.log(`\n[${ts()}] === ${name}  ->  "${album}"  (${data[name].count} ${VIDEOS ? 'videos' : 'photos'}) ===`);
     for (const filename of data[name].filenames) {
       if (added >= limit) { console.log('Reached --limit.'); save(); writeManualReview(progress, data); return; }
       if (progress[name].done.includes(filename) ||
           progress[name].notFound.includes(filename) ||
           progress[name].skipped.includes(filename) ||
+          progress[name].motion.includes(filename) ||
           progress[name].failed.includes(filename)) continue;
-      if (MOVING.test(filename)) {                              // video/GIF -> skip, list for manual add
+      if (!VIDEOS && MOVING.test(filename)) {                   // photo runs: video/GIF -> skip for manual add
         progress[name].skipped.push(filename); save();
         console.log(`  [${ts()}]  ⊘  skipped (video/GIF — add manually): ${filename}`);
         continue;
@@ -118,6 +149,9 @@ const MOVING = /\.(mp4|mov|m4v|3gp|3g2|avi|mkv|webm|wmv|flv|mpg|mpeg|mts|m2ts|in
         if (r === 'notfound') {
           progress[name].notFound.push(filename);
           console.log(`  [${ts()}]  –  not in GP search: ${filename}`);
+        } else if (r === 'motion') {
+          progress[name].motion.push(filename);
+          console.log(`  [${ts()}]  ◐  motion-photo still / not a video — add manually: ${filename}`);
         } else {
           progress[name].done.push(filename); added++;
           console.log(`  [${ts()}]  +  added:  ${filename}`);
@@ -134,8 +168,8 @@ const MOVING = /\.(mp4|mov|m4v|3gp|3g2|avi|mkv|webm|wmv|flv|mpg|mpeg|mts|m2ts|in
   }
   writeManualReview(progress, data);
   const tot = k => Object.values(progress).reduce((s, v) => s + (v[k] || []).length, 0);
-  console.log(`\n[${ts()}] Done this run. Added ${added} this run. Manual-attention totals: ${tot('skipped')} video/GIF skipped, ${tot('failed')} errored, ${tot('notFound')} not-found.`);
-  console.log(`Manual list: ${path.join(__dirname, 'gp-manual-review.txt')}  ·  Progress: ${PROGRESS}.`);
+  console.log(`\n[${ts()}] Done this run. Added ${added} this run. Manual-attention totals: ${tot('skipped')} video/GIF skipped, ${tot('motion')} motion/still, ${tot('failed')} errored, ${tot('notFound')} not-found.`);
+  console.log(`Manual list: ${REVIEW}  ·  Progress: ${PROGRESS}.`);
   console.log('Browser left open for review.');
 })();
 
@@ -164,15 +198,20 @@ async function addOne(page, filename, album) {
   // or a genuine "No results". GP transiently shows an empty/"No results" state while loading, so we
   // never conclude "not found" until results are really absent (that false-negative bit us before).
   await page.waitForURL(/\/search\//, { timeout: 8000 }).catch(() => {});
-  const total = await waitForResults(page);
-  if (!total) return 'notfound';
+  const total = await waitForResults(page, TILE_RE);
+  if (!total) {
+    // VIDEO MODE: a .MP4 search that surfaces a "Photo – …" still (motion photo) but no "Video – …" tile
+    // must NEVER be auto-added. Flag it 'motion' for manual handling; "nothing at all" stays 'notfound'.
+    if (VIDEOS && await page.getByRole('link', { name: /^Photo/ }).count()) return 'motion';
+    return 'notfound';
+  }
 
   // Select GP's first (most-relevant) match and add it. If a filename matches several different
   // photos (DSC_0059.JPG etc.), this adds the best guess — wrong picks land in a different date
   // cluster in the dry-run album, easy to spot + remove on review. (We don't try to auto-detect
   // ambiguity: GP leaves the whole library grid in the page DOM behind the results, so a reliable
   // match count isn't possible from the page — and a counter that flags everything is just noise.)
-  if (!(await selectFirstPhoto(page))) throw new Error('could not select the photo (checkbox never registered)');
+  if (!(await selectFirstPhoto(page, TILE_RE))) throw new Error('could not select the photo (checkbox never registered)');
 
   // "+" (Add to) -> "Album"
   await clickAddTo(page);
@@ -214,9 +253,9 @@ async function addOne(page, filename, album) {
 // library), we ABORT (return false) instead of clicking whatever is on screen. This is what prevents
 // the catastrophic bug of selecting an unrelated photo (the home library's most-recent) and adding it.
 // We never try to "recover" by pressing Escape / going back — that's exactly what jumped to home.
-async function selectFirstPhoto(page) {
+async function selectFirstPhoto(page, tileRe = /^Photo/) {
   const onResults = () => page.url().includes('/search/') && !page.url().includes('/photo/');
-  const link = page.getByRole('link', { name: /^Photo/ }).first();
+  const link = page.getByRole('link', { name: tileRe }).first();
   const selected = page.getByText(/\b\d+ selected\b/).first();
   for (let attempt = 0; attempt < 3; attempt++) {
     if (!onResults()) return false;                                  // never act off the results grid
@@ -286,11 +325,18 @@ async function clickOption(page, locator) {
 // conclude 0 just because the grid hasn't painted yet — GP transiently shows an empty / "No results"
 // state while loading, and treating that as "no match" caused false "not in GP" misses. Returns 1
 // (results present) or 0 (truly none). selectFirstPhoto settles the tile position itself.
-async function waitForResults(page) {
-  const tiles = () => page.getByRole('link', { name: /^Photo/ }).count();
-  for (let i = 0; i < 20; i++) {                                        // up to ~10s for results
+async function waitForResults(page, tileRe = /^Photo/) {
+  const tiles = () => page.getByRole('link', { name: tileRe }).count();
+  const max = VIDEOS ? 24 : 20;                                        // videos: a touch more patience
+  for (let i = 0; i < max; i++) {                                      // up to ~10s (photos) / ~12s (videos)
     if (await tiles() > 0) return 1;
-    if (i >= 5 && await page.getByText('No results').count()) return 0; // genuinely none (after ~3s)
+    if (i >= (VIDEOS ? 8 : 5) && await page.getByText('No results').count()) {
+      // PHOTO mode: original behavior — after ~3s, "No results" => genuinely none.
+      // VIDEO mode: GP shows a stray "No results" facet WHILE the real video tile is still painting, so
+      // only trust it once NO result tile of EITHER type ("Photo"/"Video") is present.
+      if (!VIDEOS) return 0;
+      if (!(await page.getByRole('link', { name: /^(Photo|Video)/ }).count())) return 0;
+    }
     await sleep(500);
   }
   return 0;
@@ -299,29 +345,33 @@ async function waitForResults(page) {
 // List everything needing a hand — skipped videos/GIFs, errored files, and not-found — by contributor.
 function writeManualReview(progress, data) {
   const body = [];
-  let nfT = 0, skT = 0, faT = 0;
+  let nfT = 0, skT = 0, faT = 0, moT = 0;
   for (const name of Object.keys(progress)) {
     const nf = progress[name].notFound || [];
     const sk = progress[name].skipped  || [];
     const fa = progress[name].failed   || [];
-    if (!nf.length && !sk.length && !fa.length) continue;
+    const mo = progress[name].motion   || [];
+    if (!nf.length && !sk.length && !fa.length && !mo.length) continue;
     const album = data[name] ? data[name].dryrun_album : '';
     body.push(`## ${name}  ->  "${album}"`);
-    for (const f of sk) body.push(`   [video/GIF — add manually] ${f}`);
-    for (const f of fa) body.push(`   [errored — add manually]   ${f}`);
-    for (const f of nf) body.push(`   [not found in GP]          ${f}`);
+    for (const f of sk) body.push(`   [video/GIF — add manually]    ${f}`);
+    for (const f of mo) body.push(`   [motion/still — add manually] ${f}`);
+    for (const f of fa) body.push(`   [errored — add manually]      ${f}`);
+    for (const f of nf) body.push(`   [not found in GP]             ${f}`);
     body.push('');
-    nfT += nf.length; skT += sk.length; faT += fa.length;
+    nfT += nf.length; skT += sk.length; faT += fa.length; moT += mo.length;
   }
   const head = [
-    `MANUAL ATTENTION — ${skT} video/GIF skipped + ${faT} errored + ${nfT} not-found.`,
-    'video/GIF  = intentionally skipped (videos & animations/Creations need manual adding); search the',
-    '             quoted "filename" in GP, pick it, add to its dry-run album.',
+    `MANUAL ATTENTION — ${skT} video/GIF skipped + ${moT} motion/still + ${faT} errored + ${nfT} not-found.`,
+    'video/GIF  = skipped in PHOTO runs (videos & animations/Creations are handled by the --videos run, or',
+    '             add by hand); search the quoted "filename" in GP, pick it, add to its dry-run album.',
+    'motion     = a .MP4 search surfaced a still (likely a motion photo) or a non-video tile; NOT auto-added',
+    '             so we never wrong-add — find it in GP and add it by hand.',
     'errored    = the script could not select/add it (GP quirk, e.g. stacked photos); add it by hand.',
     '             Remove it from progress.failed if you want a re-run to retry it.',
     'not found  = quoted-filename search returned nothing (different name in GP, or never uploaded; the',
     '             latter belong to the separate "upload to GP" set).',
     '',
   ];
-  try { fs.writeFileSync(path.join(__dirname, 'gp-manual-review.txt'), head.concat(body).join('\n')); } catch {}
+  try { fs.writeFileSync(REVIEW, head.concat(body).join('\n')); } catch {}
 }
