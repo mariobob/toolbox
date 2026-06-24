@@ -16,7 +16,6 @@
  *   node add-to-gp-albums.js --only "Contributor Two"   # one contributor (TEST FIRST)
  *   node add-to-gp-albums.js --only "Contributor One"     # tests create + add-to-existing
  *   node add-to-gp-albums.js --limit 3            # stop after N additions (testing)
- *   node add-to-gp-albums.js --headful-slow       # extra slow-mo to watch/debug
  *
  * One manifest holds both photos and videos; each filename is routed by extension (the MOVING regex):
  *   data  <- gp_album_additions.json (under ~/Pictures/Photos/z-PROJECT)  ·  progress -> gp-add-progress.json
@@ -41,8 +40,6 @@ const path = require('path');
 const args  = process.argv.slice(2);
 const only  = args.includes('--only')  ? args[args.indexOf('--only')  + 1] : null;
 const limit = args.includes('--limit') ? parseInt(args[args.indexOf('--limit') + 1], 10) : Infinity;
-const slowMo = args.includes('--headful-slow') ? 250 : 60;
-const PROFILE  = path.join(__dirname, 'gp-profile');         // persistent login (created on first run)
 const SHOTS    = path.join(__dirname, 'shots');
 // One manifest of {contributor -> {real_album, dryrun_album, count, filenames}} holding photos AND
 // videos. Each filename is routed at run time by the MOVING regex: photos select "Photo – …" result

@@ -55,7 +55,7 @@ in **`gp-manual-review.txt`** (those either have a different name in GP or were 
 ---
 
 **If it stops/misbehaves:** paste me the console line + the `shots/*.png` and I'll fix the selector.
-**Flags:** `--only "<name>"`, `--limit <N>`, `--headful-slow`, env `CDP_URL` (default `http://localhost:9222`).
+**Flags:** `--only "<name>"`, `--limit <N>`, env `CDP_URL` (default `http://localhost:9222`).
 
 **Why CDP and not just a Playwright-launched Chrome?** Google flags automation-launched browsers
 (`navigator.webdriver`, Chrome-for-Testing build) and blocks sign-in. Attaching to your real,
