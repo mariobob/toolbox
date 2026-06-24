@@ -133,7 +133,7 @@ const MOVING = /\.(mp4|mov|m4v|3gp|3g2|avi|mkv|webm|wmv|flv|mpg|mpeg|mts|m2ts|in
     P.motion   = P.motion   || [];                    // .MP4 that surfaced as a still -> add by hand
     console.log(`\n[${ts()}] === ${name}  ->  "${album}"  (${entry.count}) ===`);
     for (const filename of entry.filenames) {
-      if (added >= limit) { console.log('Reached --limit.'); flush(); return; }
+      if (added >= limit) { console.log('Reached --limit.'); flush(); process.exit(0); }
       if (P.done.includes(filename) ||
           P.notFound.includes(filename) ||
           P.skipped.includes(filename) ||
@@ -167,7 +167,9 @@ const MOVING = /\.(mp4|mov|m4v|3gp|3g2|avi|mkv|webm|wmv|flv|mpg|mpeg|mts|m2ts|in
   const tot = k => Object.values(progress).reduce((s, v) => s + (v[k] || []).length, 0);
   console.log(`\n[${ts()}] Done this run. Added ${added} this run. Manual-attention totals: ${tot('skipped')} skipped, ${tot('motion')} motion/still, ${tot('failed')} errored, ${tot('notFound')} not-found.`);
   console.log(`Progress: ${PROGRESS}  ·  Review: ${REVIEW}`);
-  console.log('Browser left open for review.');
+  // Chrome is your own separate process — we never close it. But the CDP socket keeps Node's event
+  // loop alive, so exit explicitly (all progress is written synchronously) instead of hanging.
+  process.exit(0);
 })();
 
 // Logged in only when the search combobox exists.
