@@ -10,6 +10,7 @@ alias lintcheck="~/path/to/lintcheck.sh"
 alias magic="~/path/to/reconnect-bluetooth-devices.sh"
 alias partial-push="~/path/to/partial-push.sh"
 alias pull-all="~/path/to/pull-all.sh"
+alias fix-mtime="~/path/to/set-mtime-from-exif.sh"
 ```
 
 ## Scripts
@@ -47,6 +48,11 @@ Pushes commits to remote while keeping the last N commits local. Safely resets, 
 Automatically reconnects Bluetooth devices. 
 
 **Useful for:** Switching peripherals between computers (e.g. magic keyboard, trackpad, mouse, headphones).
+
+### set-mtime-from-exif.sh
+Sets each file's "Last Modified" time to its capture date from embedded metadata (EXIF `DateTimeOriginal` for photos, QuickTime `CreateDate` for videos, via exiftool). Recursive by default, with `--dry-run`, `--no-recurse`, and `--ext` filtering; only the filesystem mtime changes, never file content.
+
+**Useful for:** Restoring correct timestamps after photos/videos lost them by copying between storages, emailing, or downloading — so they sort chronologically again.
 
 ### gp/add-to-gp-albums.js
 Adds your "missing from Google Photos person-album" photos **and videos** into per-contributor `[Photos] X dry-run` albums via exact-filename search, by attaching (over CDP) to your real, already-logged-in Chrome — sidestepping Google's automation sign-in block. Resumable, throttled, writes only to dry-run albums. All GP files live under `gp/`; setup + run steps in `gp/add-to-gp-albums.SETUP.md`.
