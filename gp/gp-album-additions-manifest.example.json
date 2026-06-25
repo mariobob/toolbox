@@ -1,0 +1,21 @@
+{
+  "Jane Doe": {
+    "real_album": "[Photos] Jane Doe",
+    "dryrun_album": "[Photos] Jane Doe dry-run",
+    "count": 3,
+    "filenames": [
+      "IMG_20190101_120000.jpg",
+      "DSC_0042.JPG",
+      "VID_20190101_120500.mp4"
+    ]
+  },
+  "John Doe": {
+    "real_album": "[Photos] John Doe",
+    "dryrun_album": "[Photos] John Doe dry-run",
+    "count": 2,
+    "filenames": [
+      "20200615_173000.jpg",
+      "20200615_173025.mov"
+    ]
+  }
+}

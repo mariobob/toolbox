@@ -69,6 +69,10 @@ Create the `[Photos] X dry-run` albums in Google Photos first (the script adds t
 if missing). `count` is only used for smallest-first ordering. Photos and videos share the one
 `filenames` list — the script routes each by extension.
 
+A ready-to-copy template is in [`gp-album-additions-manifest.example.json`](gp-album-additions-manifest.example.json):
+`cp gp-album-additions-manifest.example.json gp-album-additions-manifest.json` then edit it (or point
+`--manifest` at your own file anywhere).
+
 Then in Google Photos: open each `[Photos] X dry-run` → eyeball → select-all → add to the real
 `[Photos] X` → delete the dry-run.
 
