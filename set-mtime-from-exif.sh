@@ -144,4 +144,5 @@ log_info "unchanged: $same"
 [[ $nodate -gt 0 ]] && log_warn "no capture date: $nodate"
 [[ $errors -gt 0 ]] && log_error "errors: $errors"
 $DRY_RUN && [[ $changed -gt 0 || $renamed -gt 0 ]] && log_info "Re-run without --dry-run to apply."
+log_info "took ${SECONDS}s"
 exit $(( errors > 0 ? 1 : 0 ))
