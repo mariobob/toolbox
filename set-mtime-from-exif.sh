@@ -16,6 +16,9 @@ set -euo pipefail
 #                      a YYYYMMDD_hhmmss stamp ANYWHERE (e.g. IMG_20200719_183531.jpg) are left as-is.
 #   -f, --force        With --prefix-date, still prefix names whose YYYYMMDD_hhmmss stamp is NOT at
 #                      the start (names that already START with one are still kept, for idempotency).
+#       --filename-fallback
+#                      When the metadata has NO valid capture date, fall back to the filename's own
+#                      YYYYMMDD_hhmmss (e.g. Android VID_/IMG_ videos whose MP4 dates are zeroed).
 #       --warn-gap N   Warn when a filename's own YYYYMMDD_hhmmss stamp disagrees with the metadata
 #                      date by more than N seconds (default 3600; 0 disables). Catches e.g. Snapseed /
 #                      Lightroom edits that rewrote EXIF to a wrong capture date.
@@ -76,21 +79,23 @@ DRY_RUN=false
 RECURSE=true
 PREFIX_DATE=false
 FORCE=false
+FN_FALLBACK=false        # use the filename's own YYYYMMDD_hhmmss when metadata has no valid date
 WARN_GAP=3600            # warn if a filename's own YYYYMMDD_hhmmss disagrees with the metadata by > this
 EXTS=""
 TARGETS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -n|--dry-run)     DRY_RUN=true; shift ;;
-    -R|--no-recurse)  RECURSE=false; shift ;;
-    -p|--prefix-date) PREFIX_DATE=true; shift ;;
-    -f|--force)       FORCE=true; shift ;;
-    --warn-gap)       WARN_GAP="${2:-}"; shift 2 ;;
-    --ext)            EXTS="${2:-}"; shift 2 ;;
-    -h|--help)        usage; exit 0 ;;
-    -*)               log_error "Unknown option: $1"; usage; exit 1 ;;
-    *)                TARGETS+=("$1"); shift ;;
+    -n|--dry-run)          DRY_RUN=true; shift ;;
+    -R|--no-recurse)       RECURSE=false; shift ;;
+    -p|--prefix-date)      PREFIX_DATE=true; shift ;;
+    --filename-fallback)   FN_FALLBACK=true; shift ;;
+    -f|--force)            FORCE=true; shift ;;
+    --warn-gap)            WARN_GAP="${2:-}"; shift 2 ;;
+    --ext)                 EXTS="${2:-}"; shift 2 ;;
+    -h|--help)             usage; exit 0 ;;
+    -*)                    log_error "Unknown option: $1"; usage; exit 1 ;;
+    *)                     TARGETS+=("$1"); shift ;;
   esac
 done
 
@@ -115,10 +120,10 @@ if [[ -n "$EXTS" ]]; then
   for e in "${_exts[@]}"; do exif_args+=( -ext "$e" ); done
 fi
 
-log_step "set-mtime-from-exif  ($($DRY_RUN && echo 'DRY-RUN — no changes' || echo 'APPLY'); recurse=$RECURSE; prefix-date=$PREFIX_DATE; force=$FORCE; warn-gap=${WARN_GAP}s)"
+log_step "set-mtime-from-exif  ($($DRY_RUN && echo 'DRY-RUN — no changes' || echo 'APPLY'); recurse=$RECURSE; prefix-date=$PREFIX_DATE; force=$FORCE; filename-fallback=$FN_FALLBACK; warn-gap=${WARN_GAP}s)"
 log_info "Targets: ${TARGETS[*]}"
 
-changed=0 renamed=0 stamped=0 same=0 nodate=0 mismatch=0 errors=0 total=0
+changed=0 renamed=0 stamped=0 same=0 nodate=0 fromname=0 mismatch=0 errors=0 total=0
 DATE_RE='^[0-9]{12}\.[0-9]{2}$'
 # A plausible YYYYMMDD_hhmmss stamp — date/time separator may be '_' or '-' (Android screenshots use
 # '-'). Validated ranges so random digit runs don't match; trailing digits (a Pixel's milliseconds)
@@ -135,20 +140,27 @@ exiftool "${exif_args[@]}" "${TARGETS[@]}" > "$_tmp" 2>/dev/null || true
 
 while IFS=$'\t' read -r fmod dto cre mcre tcre src; do
   total=$((total + 1))
-  chosen=""
+  base="${src##*/}"
+  chosen=""; from_name=false
   for cand in "$dto" "$cre" "$mcre" "$tcre"; do
     if [[ "$cand" =~ $DATE_RE ]]; then chosen="$cand"; break; fi
   done
+  # Fallback: metadata has no valid date, but the filename carries its own YYYYMMDD_hhmmss (e.g. Android
+  # VID_/IMG_ videos whose MP4 create-dates are zeroed) -> use it, if --filename-fallback is on.
+  if [[ -z "$chosen" && $FN_FALLBACK == true && "$base" =~ $TS_ANYWHERE && "$base" =~ ([0-9]{8})[_-]([0-9]{6}) ]]; then
+    chosen="${BASH_REMATCH[1]}${BASH_REMATCH[2]:0:4}.${BASH_REMATCH[2]:4:2}"
+    from_name=true; fromname=$((fromname + 1))
+  fi
   if [[ -z "$chosen" ]]; then
     log_warn "no capture date, skipped: $src"
     nodate=$((nodate + 1)); continue
   fi
-  base="${src##*/}"
   to_epoch "$chosen"; ce=$EPOCH        # capture-date epoch, reused for both checks below
 
   # Sanity: if the filename carries its own YYYYMMDD_hhmmss (camera capture stamp) that disagrees with
   # the metadata date by more than WARN_GAP, the metadata is suspect (e.g. Snapseed/Lightroom rewrote it).
-  if [[ $WARN_GAP -gt 0 && "$base" =~ $TS_ANYWHERE && "$base" =~ ([0-9]{8})[_-]([0-9]{6}) ]]; then
+  # (Skipped when chosen already came from the filename — there's nothing to compare it against.)
+  if [[ $from_name == false && $WARN_GAP -gt 0 && "$base" =~ $TS_ANYWHERE && "$base" =~ ([0-9]{8})[_-]([0-9]{6}) ]]; then
     fn_ts="${BASH_REMATCH[1]}${BASH_REMATCH[2]:0:4}.${BASH_REMATCH[2]:4:2}"   # %Y%m%d%H%M.%S
     to_epoch "$fn_ts"; fe=$EPOCH
     if [[ -n "$fe" && -n "$ce" ]]; then
@@ -169,11 +181,12 @@ while IFS=$'\t' read -r fmod dto cre mcre tcre src; do
     to_epoch "$fmod"; _e1=$EPOCH
     gap=''
     if [[ -n "$_e1" && -n "$ce" ]]; then human_secs $(( ce - _e1 )); gap="  ${COLOR_DIM}(${HUMAN})${COLOR_RESET}"; fi
+    note=''; $from_name && note="  ${COLOR_DIM}[from filename]${COLOR_RESET}"
     if $DRY_RUN; then
-      log_info "mtime: $src  ${COLOR_DIM}${fmod} ->${COLOR_RESET} ${chosen}${gap}"
+      log_info "mtime: $src  ${COLOR_DIM}${fmod} ->${COLOR_RESET} ${chosen}${gap}${note}"
       changed=$((changed + 1))
     elif touch -t "$chosen" -- "$src"; then
-      log_success "mtime: $src  ${COLOR_DIM}${fmod} ->${COLOR_RESET} ${chosen}${gap}"
+      log_success "mtime: $src  ${COLOR_DIM}${fmod} ->${COLOR_RESET} ${chosen}${gap}${note}"
       changed=$((changed + 1))
     else
       log_error "touch failed: $src"
@@ -215,6 +228,7 @@ log_step "Summary"
 [[ $total -eq 0 ]] && log_warn "No readable media found."
 log_info "scanned: $total"
 log_success "$($DRY_RUN && echo 'mtime would change' || echo 'mtime changed'): $changed"
+[[ $fromname -gt 0 ]] && log_info "date from filename (metadata had none): $fromname"
 $PREFIX_DATE && log_success "$($DRY_RUN && echo 'would rename' || echo 'renamed'): $renamed"
 $PREFIX_DATE && [[ $stamped -gt 0 ]] && log_info "name already timestamped (kept): $stamped"
 log_info "unchanged: $same"
