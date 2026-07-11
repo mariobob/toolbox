@@ -31,6 +31,30 @@ source "$SCRIPT_DIR/lib/log.sh"
 # Print the leading comment block (from line 4 to the first non-comment line) as help.
 usage() { awk 'NR<4{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "${BASH_SOURCE[0]}"; }
 
+# Signed, human-readable gap between two "%Y%m%d%H%M.%S" timestamps (top 2 units, e.g. "+1h 3s",
+# "-1682d" -> "-4y 217d"). Prints nothing if either can't be parsed.
+mtime_diff() {
+  local o n delta sign abs y d h m s out
+  o=$(date -j -f '%Y%m%d%H%M.%S' "$1" +%s 2>/dev/null) || return 0
+  n=$(date -j -f '%Y%m%d%H%M.%S' "$2" +%s 2>/dev/null) || return 0
+  delta=$(( n - o ))
+  if [[ $delta -lt 0 ]]; then sign='-'; abs=$(( -delta )); else sign='+'; abs=$delta; fi
+  y=$(( abs / 31536000 )); abs=$(( abs % 31536000 ))
+  d=$(( abs / 86400 ));    abs=$(( abs % 86400 ))
+  h=$(( abs / 3600 ));     abs=$(( abs % 3600 ))
+  m=$(( abs / 60 ));       s=$(( abs % 60 ))
+  local parts=()
+  [[ $y -gt 0 ]] && parts+=("${y}y")
+  [[ $d -gt 0 ]] && parts+=("${d}d")
+  [[ $h -gt 0 ]] && parts+=("${h}h")
+  [[ $m -gt 0 ]] && parts+=("${m}m")
+  [[ $s -gt 0 ]] && parts+=("${s}s")
+  [[ ${#parts[@]} -eq 0 ]] && parts=("0s")
+  out="${sign}${parts[0]}"
+  [[ ${#parts[@]} -gt 1 ]] && out="${out} ${parts[1]}"
+  printf '%s' "$out"
+}
+
 DRY_RUN=false
 RECURSE=true
 PREFIX_DATE=false
@@ -105,11 +129,13 @@ while IFS=$'\t' read -r fmod dto cre mcre tcre src; do
   # (1) mtime — set it if it differs from the capture date.
   if [[ "$chosen" != "$fmod" ]]; then
     acted=true
+    gap="$(mtime_diff "$fmod" "$chosen")"
+    [[ -n "$gap" ]] && gap="  ${COLOR_DIM}(${gap})${COLOR_RESET}"
     if $DRY_RUN; then
-      log_info "mtime: $src  ${COLOR_DIM}${fmod} ->${COLOR_RESET} ${chosen}"
+      log_info "mtime: $src  ${COLOR_DIM}${fmod} ->${COLOR_RESET} ${chosen}${gap}"
       changed=$((changed + 1))
     elif touch -t "$chosen" -- "$src"; then
-      log_success "mtime: $src  ${COLOR_DIM}${fmod} ->${COLOR_RESET} ${chosen}"
+      log_success "mtime: $src  ${COLOR_DIM}${fmod} ->${COLOR_RESET} ${chosen}${gap}"
       changed=$((changed + 1))
     else
       log_error "touch failed: $src"
