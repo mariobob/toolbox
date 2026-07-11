@@ -76,10 +76,10 @@ log_info "Targets: ${TARGETS[*]}"
 
 changed=0 renamed=0 stamped=0 same=0 nodate=0 errors=0 total=0
 DATE_RE='^[0-9]{12}\.[0-9]{2}$'
-# A plausible YYYYMMDD_hhmmss stamp (validated ranges, so random digit runs don't match; trailing
-# digits like a Pixel's milliseconds are fine). Used to skip files that already carry a capture
-# timestamp so --prefix-date never double-stamps and stays idempotent.
-_ts='(19|20)[0-9]{2}(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])_([01][0-9]|2[0-3])[0-5][0-9][0-5][0-9]'
+# A plausible YYYYMMDD_hhmmss stamp — date/time separator may be '_' or '-' (Android screenshots use
+# '-'). Validated ranges so random digit runs don't match; trailing digits (a Pixel's milliseconds)
+# are fine. Used to skip files already carrying a capture timestamp so --prefix-date never double-stamps.
+_ts='(19|20)[0-9]{2}(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])[_-]([01][0-9]|2[0-3])[0-5][0-9][0-5][0-9]'
 TS_START='^'"$_ts"                          # stamp at the very start:  20200719_183531 ...
 TS_ANYWHERE='(^|[^0-9])'"$_ts"              # stamp anywhere: IMG_/VID_/PXL_ 20200719_183531 ...
 
