@@ -12,8 +12,10 @@ set -euo pipefail
 #   -n, --dry-run      Show what would change; touch/rename nothing.
 #   -R, --no-recurse   Do not descend into subdirectories.
 #   -p, --prefix-date  Also rename each file, prefixing "YYYYMMDD_hhmmss " (capture date + a space)
-#                      to its current name — on TOP of setting the mtime. Names that already start
-#                      with a YYYYMMDD_hhmmss stamp are left as-is (no double-stamping).
+#                      to its current name — on TOP of setting the mtime. Names that already contain
+#                      a YYYYMMDD_hhmmss stamp ANYWHERE (e.g. IMG_20200719_183531.jpg) are left as-is.
+#   -f, --force        With --prefix-date, still prefix names whose YYYYMMDD_hhmmss stamp is NOT at
+#                      the start (names that already START with one are still kept, for idempotency).
 #       --ext LIST     Restrict to comma-separated extensions (e.g. jpg,heic,mp4).
 #   -h, --help         Show this help.
 #
@@ -32,6 +34,7 @@ usage() { awk 'NR<4{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "${BASH_SOUR
 DRY_RUN=false
 RECURSE=true
 PREFIX_DATE=false
+FORCE=false
 EXTS=""
 TARGETS=()
 
@@ -40,6 +43,7 @@ while [[ $# -gt 0 ]]; do
     -n|--dry-run)     DRY_RUN=true; shift ;;
     -R|--no-recurse)  RECURSE=false; shift ;;
     -p|--prefix-date) PREFIX_DATE=true; shift ;;
+    -f|--force)       FORCE=true; shift ;;
     --ext)            EXTS="${2:-}"; shift 2 ;;
     -h|--help)        usage; exit 0 ;;
     -*)               log_error "Unknown option: $1"; usage; exit 1 ;;
@@ -67,14 +71,17 @@ if [[ -n "$EXTS" ]]; then
   for e in "${_exts[@]}"; do exif_args+=( -ext "$e" ); done
 fi
 
-log_step "set-mtime-from-exif  ($($DRY_RUN && echo 'DRY-RUN — no changes' || echo 'APPLY'); recurse=$RECURSE; prefix-date=$PREFIX_DATE)"
+log_step "set-mtime-from-exif  ($($DRY_RUN && echo 'DRY-RUN — no changes' || echo 'APPLY'); recurse=$RECURSE; prefix-date=$PREFIX_DATE; force=$FORCE)"
 log_info "Targets: ${TARGETS[*]}"
 
 changed=0 renamed=0 stamped=0 same=0 nodate=0 errors=0 total=0
 DATE_RE='^[0-9]{12}\.[0-9]{2}$'
-# A name that already begins with a YYYYMMDD_hhmmss stamp (any separator/end after it) — used to
-# avoid double-stamping and to make --prefix-date re-runs idempotent.
-TS_RE='^[0-9]{8}_[0-9]{6}([^0-9]|$)'
+# A plausible YYYYMMDD_hhmmss stamp (validated ranges, so random digit runs don't match; trailing
+# digits like a Pixel's milliseconds are fine). Used to skip files that already carry a capture
+# timestamp so --prefix-date never double-stamps and stays idempotent.
+_ts='(19|20)[0-9]{2}(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])_([01][0-9]|2[0-3])[0-5][0-9][0-5][0-9]'
+TS_START='^'"$_ts"                          # stamp at the very start:  20200719_183531 ...
+TS_ANYWHERE='(^|[^0-9])'"$_ts"              # stamp anywhere: IMG_/VID_/PXL_ 20200719_183531 ...
 
 # Buffer exiftool's output to a temp file first, so a rename can never race exiftool's
 # own recursive walk (which might otherwise re-encounter a just-renamed file).
@@ -110,12 +117,12 @@ while IFS=$'\t' read -r fmod dto cre mcre tcre src; do
     fi
   fi
 
-  # (2) filename — with --prefix-date, prepend "YYYYMMDD_hhmmss " (capture date + a space),
-  #     UNLESS the name already starts with a YYYYMMDD_hhmmss stamp (prevents double-stamping,
-  #     and makes re-runs idempotent).
+  # (2) filename — with --prefix-date, prepend "YYYYMMDD_hhmmss " (capture date + a space), UNLESS the
+  #     name already carries a YYYYMMDD_hhmmss stamp: anywhere by default, or only at the start (--force).
   if $PREFIX_DATE; then
     base="$(basename -- "$src")"
-    if [[ "$base" =~ $TS_RE ]]; then
+    if $FORCE; then guard_re="$TS_START"; else guard_re="$TS_ANYWHERE"; fi
+    if [[ "$base" =~ $guard_re ]]; then
       stamped=$((stamped + 1))                               # already timestamped — keep name as-is
     else
       acted=true
