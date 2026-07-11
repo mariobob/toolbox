@@ -34,12 +34,27 @@ source "$SCRIPT_DIR/lib/log.sh"
 # Print the leading comment block (from line 4 to the first non-comment line) as help.
 usage() { awk 'NR<4{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "${BASH_SOURCE[0]}"; }
 
-# Epoch seconds for a "%Y%m%d%H%M.%S" timestamp (empty if unparseable).
-epoch_of() { date -j -f '%Y%m%d%H%M.%S' "$1" +%s 2>/dev/null || true; }
+# Naive epoch seconds for a "%Y%m%d%H%M.%S" timestamp -> global EPOCH ('' if unparseable). Pure bash
+# (no `date` fork). Treats the time as UTC — we only ever use DIFFERENCES, which are the wall-clock gap.
+to_epoch() {
+  EPOCH=''
+  [[ "$1" =~ ^([0-9]{4})([0-9]{2})([0-9]{2})([0-9]{2})([0-9]{2})\.([0-9]{2})$ ]] || return 0
+  local Y=$((10#${BASH_REMATCH[1]})) Mo=$((10#${BASH_REMATCH[2]})) D=$((10#${BASH_REMATCH[3]}))
+  local hh=$((10#${BASH_REMATCH[4]})) mm=$((10#${BASH_REMATCH[5]})) ss=$((10#${BASH_REMATCH[6]}))
+  local y=$Y era yoe mp doy doe days
+  [[ $Mo -le 2 ]] && y=$((y - 1))
+  if [[ $y -ge 0 ]]; then era=$((y / 400)); else era=$(( (y - 399) / 400 )); fi
+  yoe=$(( y - era*400 ))
+  mp=$(( (Mo + 9) % 12 ))
+  doy=$(( (153*mp + 2)/5 + D - 1 ))
+  doe=$(( yoe*365 + yoe/4 - yoe/100 + doy ))
+  days=$(( era*146097 + doe - 719468 ))                  # days since 1970-01-01 (Hinnant's algorithm)
+  EPOCH=$(( days*86400 + hh*3600 + mm*60 + ss ))
+}
 
-# Format a signed second count as a top-2-unit string, e.g. -78330 -> "-21h 45m", 2 -> "+2s".
+# Signed top-2-unit human string for a second delta -> global HUMAN, e.g. -78330 -> "-21h 45m".
 human_secs() {
-  local delta=$1 sign abs y d h m s out
+  local delta=$1 sign abs y d h m s
   if [[ $delta -lt 0 ]]; then sign='-'; abs=$(( -delta )); else sign='+'; abs=$delta; fi
   y=$(( abs / 31536000 )); abs=$(( abs % 31536000 ))
   d=$(( abs / 86400 ));    abs=$(( abs % 86400 ))
@@ -52,17 +67,9 @@ human_secs() {
   [[ $m -gt 0 ]] && parts+=("${m}m")
   [[ $s -gt 0 ]] && parts+=("${s}s")
   [[ ${#parts[@]} -eq 0 ]] && parts=("0s")
-  out="${sign}${parts[0]}"
-  [[ ${#parts[@]} -gt 1 ]] && out="${out} ${parts[1]}"
-  printf '%s' "$out"
-}
-
-# Signed human gap between two "%Y%m%d%H%M.%S" timestamps; prints nothing if either can't be parsed.
-mtime_diff() {
-  local o n
-  o=$(epoch_of "$1"); n=$(epoch_of "$2")
-  [[ -n "$o" && -n "$n" ]] || return 0
-  human_secs $(( n - o ))
+  HUMAN="${sign}${parts[0]}"
+  [[ ${#parts[@]} -gt 1 ]] && HUMAN="${HUMAN} ${parts[1]}"
+  return 0
 }
 
 DRY_RUN=false
@@ -136,17 +143,19 @@ while IFS=$'\t' read -r fmod dto cre mcre tcre src; do
     log_warn "no capture date, skipped: $src"
     nodate=$((nodate + 1)); continue
   fi
-  base="$(basename -- "$src")"
+  base="${src##*/}"
+  to_epoch "$chosen"; ce=$EPOCH        # capture-date epoch, reused for both checks below
 
   # Sanity: if the filename carries its own YYYYMMDD_hhmmss (camera capture stamp) that disagrees with
   # the metadata date by more than WARN_GAP, the metadata is suspect (e.g. Snapseed/Lightroom rewrote it).
   if [[ $WARN_GAP -gt 0 && "$base" =~ $TS_ANYWHERE && "$base" =~ ([0-9]{8})[_-]([0-9]{6}) ]]; then
     fn_ts="${BASH_REMATCH[1]}${BASH_REMATCH[2]:0:4}.${BASH_REMATCH[2]:4:2}"   # %Y%m%d%H%M.%S
-    fe="$(epoch_of "$fn_ts")"; ce="$(epoch_of "$chosen")"
+    to_epoch "$fn_ts"; fe=$EPOCH
     if [[ -n "$fe" && -n "$ce" ]]; then
       gd=$(( ce - fe ))
       if [[ ${gd#-} -gt $WARN_GAP ]]; then
-        log_warn "name↔metadata mismatch: $src  ${COLOR_DIM}name ${fn_ts} vs meta ${chosen} ($(human_secs $gd))${COLOR_RESET}"
+        human_secs "$gd"
+        log_warn "name↔metadata mismatch: $src  ${COLOR_DIM}name ${fn_ts} vs meta ${chosen} (${HUMAN})${COLOR_RESET}"
         mismatch=$((mismatch + 1))
       fi
     fi
@@ -157,8 +166,9 @@ while IFS=$'\t' read -r fmod dto cre mcre tcre src; do
   # (1) mtime — set it if it differs from the capture date.
   if [[ "$chosen" != "$fmod" ]]; then
     acted=true
-    gap="$(mtime_diff "$fmod" "$chosen")"
-    [[ -n "$gap" ]] && gap="  ${COLOR_DIM}(${gap})${COLOR_RESET}"
+    to_epoch "$fmod"; _e1=$EPOCH
+    gap=''
+    if [[ -n "$_e1" && -n "$ce" ]]; then human_secs $(( ce - _e1 )); gap="  ${COLOR_DIM}(${HUMAN})${COLOR_RESET}"; fi
     if $DRY_RUN; then
       log_info "mtime: $src  ${COLOR_DIM}${fmod} ->${COLOR_RESET} ${chosen}${gap}"
       changed=$((changed + 1))
@@ -180,7 +190,7 @@ while IFS=$'\t' read -r fmod dto cre mcre tcre src; do
     else
       acted=true
       prefix="${chosen:0:8}_${chosen:8:4}${chosen:13:2}"     # YYYYMMDD_hhmmss, derived from $chosen
-      dir="$(dirname -- "$src")"
+      dir="${src%/*}"
       newpath="$dir/$prefix $base"
       if [[ -e "$newpath" ]]; then
         log_error "rename skipped (target exists): $prefix $base"
