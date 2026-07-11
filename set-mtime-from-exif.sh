@@ -19,6 +19,10 @@ set -euo pipefail
 #       --filename-fallback
 #                      When the metadata has NO valid capture date, fall back to the filename's own
 #                      YYYYMMDD_hhmmss (e.g. Android VID_/IMG_ videos whose MP4 dates are zeroed).
+#       --prefer-filename
+#                      Use the filename's YYYYMMDD_hhmmss IN PREFERENCE TO the metadata whenever present.
+#                      It's the phone's on-location local time — correct for travel footage (metadata is
+#                      converted to THIS machine's timezone), and immune to editor-corrupted EXIF.
 #       --warn-gap N   Warn when a filename's own YYYYMMDD_hhmmss stamp disagrees with the metadata
 #                      date by more than N seconds (default 3600; 0 disables). Catches e.g. Snapseed /
 #                      Lightroom edits that rewrote EXIF to a wrong capture date.
@@ -80,6 +84,7 @@ RECURSE=true
 PREFIX_DATE=false
 FORCE=false
 FN_FALLBACK=false        # use the filename's own YYYYMMDD_hhmmss when metadata has no valid date
+PREFER_NAME=false        # use the filename's own YYYYMMDD_hhmmss IN PREFERENCE TO the metadata date
 WARN_GAP=3600            # warn if a filename's own YYYYMMDD_hhmmss disagrees with the metadata by > this
 EXTS=""
 TARGETS=()
@@ -90,6 +95,7 @@ while [[ $# -gt 0 ]]; do
     -R|--no-recurse)       RECURSE=false; shift ;;
     -p|--prefix-date)      PREFIX_DATE=true; shift ;;
     --filename-fallback)   FN_FALLBACK=true; shift ;;
+    --prefer-filename)     PREFER_NAME=true; shift ;;
     -f|--force)            FORCE=true; shift ;;
     --warn-gap)            WARN_GAP="${2:-}"; shift 2 ;;
     --ext)                 EXTS="${2:-}"; shift 2 ;;
@@ -120,7 +126,7 @@ if [[ -n "$EXTS" ]]; then
   for e in "${_exts[@]}"; do exif_args+=( -ext "$e" ); done
 fi
 
-log_step "set-mtime-from-exif  ($($DRY_RUN && echo 'DRY-RUN — no changes' || echo 'APPLY'); recurse=$RECURSE; prefix-date=$PREFIX_DATE; force=$FORCE; filename-fallback=$FN_FALLBACK; warn-gap=${WARN_GAP}s)"
+log_step "set-mtime-from-exif  ($($DRY_RUN && echo 'DRY-RUN — no changes' || echo 'APPLY'); recurse=$RECURSE; prefix-date=$PREFIX_DATE; force=$FORCE; prefer-filename=$PREFER_NAME; filename-fallback=$FN_FALLBACK; warn-gap=${WARN_GAP}s)"
 log_info "Targets: ${TARGETS[*]}"
 
 changed=0 renamed=0 stamped=0 same=0 nodate=0 fromname=0 mismatch=0 errors=0 total=0
@@ -142,14 +148,28 @@ while IFS=$'\t' read -r fmod dto cre mcre tcre src; do
   total=$((total + 1))
   base="${src##*/}"
   chosen=""; from_name=false
-  for cand in "$dto" "$cre" "$mcre" "$tcre"; do
-    if [[ "$cand" =~ $DATE_RE ]]; then chosen="$cand"; break; fi
-  done
-  # Fallback: metadata has no valid date, but the filename carries its own YYYYMMDD_hhmmss (e.g. Android
-  # VID_/IMG_ videos whose MP4 create-dates are zeroed) -> use it, if --filename-fallback is on.
-  if [[ -z "$chosen" && $FN_FALLBACK == true && "$base" =~ $TS_ANYWHERE && "$base" =~ ([0-9]{8})[_-]([0-9]{6}) ]]; then
-    chosen="${BASH_REMATCH[1]}${BASH_REMATCH[2]:0:4}.${BASH_REMATCH[2]:4:2}"
-    from_name=true; fromname=$((fromname + 1))
+  # The filename's own YYYYMMDD_hhmmss (if any), extracted once — used by --prefer-filename,
+  # --filename-fallback, and the mismatch check. It is the phone's ON-LOCATION local time at capture.
+  fn_ts=''
+  if [[ "$base" =~ $TS_ANYWHERE && "$base" =~ ([0-9]{8})[_-]([0-9]{6}) ]]; then
+    fn_ts="${BASH_REMATCH[1]}${BASH_REMATCH[2]:0:4}.${BASH_REMATCH[2]:4:2}"   # %Y%m%d%H%M.%S
+  fi
+
+  # (1) --prefer-filename: trust the filename's capture stamp over metadata — correct on-location local
+  #     time for travel footage, and sidesteps editor-corrupted EXIF.
+  if $PREFER_NAME && [[ -n "$fn_ts" ]]; then
+    chosen="$fn_ts"; from_name=true; fromname=$((fromname + 1))
+  fi
+  # (2) else the metadata date (DateTimeOriginal > CreateDate > MediaCreateDate > TrackCreateDate).
+  if [[ -z "$chosen" ]]; then
+    for cand in "$dto" "$cre" "$mcre" "$tcre"; do
+      if [[ "$cand" =~ $DATE_RE ]]; then chosen="$cand"; break; fi
+    done
+  fi
+  # (3) else fall back to the filename stamp, if --filename-fallback and metadata had none (e.g. Android
+  #     VID_/IMG_ videos whose MP4 create-dates are zeroed).
+  if [[ -z "$chosen" && $FN_FALLBACK == true && -n "$fn_ts" ]]; then
+    chosen="$fn_ts"; from_name=true; fromname=$((fromname + 1))
   fi
   if [[ -z "$chosen" ]]; then
     log_warn "no capture date, skipped: $src"
@@ -160,8 +180,7 @@ while IFS=$'\t' read -r fmod dto cre mcre tcre src; do
   # Sanity: if the filename carries its own YYYYMMDD_hhmmss (camera capture stamp) that disagrees with
   # the metadata date by more than WARN_GAP, the metadata is suspect (e.g. Snapseed/Lightroom rewrote it).
   # (Skipped when chosen already came from the filename — there's nothing to compare it against.)
-  if [[ $from_name == false && $WARN_GAP -gt 0 && "$base" =~ $TS_ANYWHERE && "$base" =~ ([0-9]{8})[_-]([0-9]{6}) ]]; then
-    fn_ts="${BASH_REMATCH[1]}${BASH_REMATCH[2]:0:4}.${BASH_REMATCH[2]:4:2}"   # %Y%m%d%H%M.%S
+  if [[ $from_name == false && $WARN_GAP -gt 0 && -n "$fn_ts" ]]; then
     to_epoch "$fn_ts"; fe=$EPOCH
     if [[ -n "$fe" && -n "$ce" ]]; then
       gd=$(( ce - fe ))
@@ -228,7 +247,7 @@ log_step "Summary"
 [[ $total -eq 0 ]] && log_warn "No readable media found."
 log_info "scanned: $total"
 log_success "$($DRY_RUN && echo 'mtime would change' || echo 'mtime changed'): $changed"
-[[ $fromname -gt 0 ]] && log_info "date from filename (metadata had none): $fromname"
+[[ $fromname -gt 0 ]] && log_info "date taken from filename: $fromname"
 $PREFIX_DATE && log_success "$($DRY_RUN && echo 'would rename' || echo 'renamed'): $renamed"
 $PREFIX_DATE && [[ $stamped -gt 0 ]] && log_info "name already timestamped (kept): $stamped"
 log_info "unchanged: $same"
