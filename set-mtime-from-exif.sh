@@ -86,7 +86,7 @@ while IFS=$'\t' read -r fmod dto cre mcre tcre src; do
     log_info "would set: $src  ${COLOR_DIM}${fmod} ->${COLOR_RESET} ${chosen}"
     changed=$((changed + 1))
   elif touch -t "$chosen" -- "$src"; then
-    log_success "$src  -> ${chosen}"
+    log_success "$src  ${COLOR_DIM}${fmod} ->${COLOR_RESET} ${chosen}"
     changed=$((changed + 1))
   else
     log_error "touch failed: $src"
