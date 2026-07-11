@@ -50,7 +50,7 @@ Automatically reconnects Bluetooth devices.
 **Useful for:** Switching peripherals between computers (e.g. magic keyboard, trackpad, mouse, headphones).
 
 ### set-mtime-from-exif.sh
-Sets each file's "Last Modified" time to its capture date from embedded metadata (EXIF `DateTimeOriginal` for photos, QuickTime `CreateDate` for videos, via exiftool). With `--prefix-date` it also renames each file, prepending `YYYYMMDD_hhmmss ` (capture date + a space) to its name. Recursive by default, with `--dry-run`, `--no-recurse`, and `--ext` filtering; the mtime step never alters file content.
+Sets each file's "Last Modified" time to its capture date from embedded metadata (EXIF `DateTimeOriginal` for photos, QuickTime `CreateDate` for videos, via exiftool). With `--prefix-date` it also renames each file, prepending `YYYYMMDD_hhmmss ` (capture date + a space) to its name (names that already start with such a stamp are left as-is, so it never double-stamps). Recursive by default, with `--dry-run`, `--no-recurse`, and `--ext` filtering; the mtime step never alters file content.
 
 **Useful for:** Restoring correct timestamps after photos/videos lost them by copying between storages, emailing, or downloading — so they sort chronologically again.
 

@@ -12,7 +12,8 @@ set -euo pipefail
 #   -n, --dry-run      Show what would change; touch/rename nothing.
 #   -R, --no-recurse   Do not descend into subdirectories.
 #   -p, --prefix-date  Also rename each file, prefixing "YYYYMMDD_hhmmss " (capture date + a space)
-#                      to its current name — on TOP of setting the mtime.
+#                      to its current name — on TOP of setting the mtime. Names that already start
+#                      with a YYYYMMDD_hhmmss stamp are left as-is (no double-stamping).
 #       --ext LIST     Restrict to comma-separated extensions (e.g. jpg,heic,mp4).
 #   -h, --help         Show this help.
 #
@@ -69,8 +70,11 @@ fi
 log_step "set-mtime-from-exif  ($($DRY_RUN && echo 'DRY-RUN — no changes' || echo 'APPLY'); recurse=$RECURSE; prefix-date=$PREFIX_DATE)"
 log_info "Targets: ${TARGETS[*]}"
 
-changed=0 renamed=0 same=0 nodate=0 errors=0 total=0
+changed=0 renamed=0 stamped=0 same=0 nodate=0 errors=0 total=0
 DATE_RE='^[0-9]{12}\.[0-9]{2}$'
+# A name that already begins with a YYYYMMDD_hhmmss stamp (any separator/end after it) — used to
+# avoid double-stamping and to make --prefix-date re-runs idempotent.
+TS_RE='^[0-9]{8}_[0-9]{6}([^0-9]|$)'
 
 # Buffer exiftool's output to a temp file first, so a rename can never race exiftool's
 # own recursive walk (which might otherwise re-encounter a just-renamed file).
@@ -106,15 +110,17 @@ while IFS=$'\t' read -r fmod dto cre mcre tcre src; do
     fi
   fi
 
-  # (2) filename — with --prefix-date, prepend "YYYYMMDD_hhmmss " (capture date + a space).
+  # (2) filename — with --prefix-date, prepend "YYYYMMDD_hhmmss " (capture date + a space),
+  #     UNLESS the name already starts with a YYYYMMDD_hhmmss stamp (prevents double-stamping,
+  #     and makes re-runs idempotent).
   if $PREFIX_DATE; then
-    prefix="${chosen:0:8}_${chosen:8:4}${chosen:13:2}"      # YYYYMMDD_hhmmss, derived from $chosen
     base="$(basename -- "$src")"
-    dir="$(dirname -- "$src")"
-    if [[ "$base" == "$prefix "* ]]; then
-      :                                                      # already carries this exact prefix — skip
+    if [[ "$base" =~ $TS_RE ]]; then
+      stamped=$((stamped + 1))                               # already timestamped — keep name as-is
     else
       acted=true
+      prefix="${chosen:0:8}_${chosen:8:4}${chosen:13:2}"     # YYYYMMDD_hhmmss, derived from $chosen
+      dir="$(dirname -- "$src")"
       newpath="$dir/$prefix $base"
       if [[ -e "$newpath" ]]; then
         log_error "rename skipped (target exists): $prefix $base"
@@ -140,6 +146,7 @@ log_step "Summary"
 log_info "scanned: $total"
 log_success "$($DRY_RUN && echo 'mtime would change' || echo 'mtime changed'): $changed"
 $PREFIX_DATE && log_success "$($DRY_RUN && echo 'would rename' || echo 'renamed'): $renamed"
+$PREFIX_DATE && [[ $stamped -gt 0 ]] && log_info "name already timestamped (kept): $stamped"
 log_info "unchanged: $same"
 [[ $nodate -gt 0 ]] && log_warn "no capture date: $nodate"
 [[ $errors -gt 0 ]] && log_error "errors: $errors"
