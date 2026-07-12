@@ -27,6 +27,10 @@ set -euo pipefail
 #                      date by more than N seconds (default 3600; 0 disables). Catches e.g. Snapseed /
 #                      Lightroom edits that rewrote EXIF to a wrong capture date.
 #       --ext LIST     Restrict to comma-separated extensions (e.g. jpg,heic,mp4).
+#       --manifest F   Record every change (old→new mtime, old→new name) to F as JSON, so the run can
+#                      be reversed later. (Only on a real run, not --dry-run.)
+#       --undo F       Reverse a manifest written by --manifest (rename back + restore mtime), then exit.
+#                      Honours --dry-run for a preview. Needs jq.
 #   -h, --help         Show this help.
 #
 # Source of truth (highest priority first): DateTimeOriginal > CreateDate >
@@ -79,6 +83,64 @@ human_secs() {
   return 0
 }
 
+# JSON-escape $1 -> global JE (handles backslash, quote, tab, newline, CR).
+json_esc() {
+  local s=$1
+  s=${s//\\/\\\\}; s=${s//\"/\\\"}
+  s=${s//$'\t'/\\t}; s=${s//$'\n'/\\n}; s=${s//$'\r'/\\r}
+  JE=$s
+}
+
+# Write collected change rows to MANIFEST_FILE as JSON. Called from the EXIT trap, so an interrupted
+# run still leaves a manifest of what it managed to change.
+write_manifest() {
+  [[ -n "$MANIFEST_FILE" && ${#MANIFEST_ROWS[@]} -gt 0 ]] || return 0
+  { printf '{\n  "tool": "set-mtime-from-exif",\n  "generated": "%s",\n  "changes": [\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+    local i n=${#MANIFEST_ROWS[@]}
+    for ((i = 0; i < n; i++)); do
+      printf '    %s' "${MANIFEST_ROWS[i]}"
+      [[ $i -lt $((n - 1)) ]] && printf ','
+      printf '\n'
+    done
+    printf '  ]\n}\n'
+  } > "$MANIFEST_FILE"
+  return 0
+}
+
+# Reverse a manifest: rename each file back, then restore its mtime. Honours --dry-run. Needs jq.
+# (jq emits 4 lines per change — orig, final, orig_mtime, mtime_changed — read as a group.)
+undo_manifest() {
+  local f="$1"
+  [[ -f "$f" ]] || { log_error "manifest not found: $f"; exit 1; }
+  command -v jq >/dev/null 2>&1 || { log_error "--undo needs jq (brew install jq)"; exit 1; }
+  log_step "set-mtime-from-exif --undo  ($($DRY_RUN && echo 'DRY-RUN — no changes' || echo 'APPLY'))"
+  log_info "Manifest: $f"
+  local orig final omt mch restored=0 skipped=0 uerr=0
+  while IFS= read -r orig && IFS= read -r final && IFS= read -r omt && IFS= read -r mch; do
+    if [[ "$final" != "$orig" ]]; then
+      if [[ ! -e "$final" ]]; then
+        if [[ -e "$orig" ]]; then log_info "already reverted: $orig"; restored=$((restored + 1))
+        else log_warn "missing, skipped: $final"; skipped=$((skipped + 1)); fi
+        continue
+      fi
+      if $DRY_RUN; then log_info "would rename back: $final -> $orig"
+      elif mv -- "$final" "$orig"; then log_success "renamed back: $final${COLOR_DIM} -> ${COLOR_RESET}$orig"
+      else log_error "rename-back failed: $final"; uerr=$((uerr + 1)); continue; fi
+    fi
+    if [[ "$mch" == "true" ]]; then
+      if $DRY_RUN; then log_info "would restore mtime: $orig -> $omt"
+      elif touch -t "$omt" -- "$orig"; then log_success "mtime restored: $orig${COLOR_DIM} -> ${COLOR_RESET}$omt"
+      else log_error "mtime-restore failed: $orig"; uerr=$((uerr + 1)); continue; fi
+    fi
+    restored=$((restored + 1))
+  done < <(jq -r '.changes[] | .orig_path, .final_path, .orig_mtime, (.mtime_changed|tostring)' "$f")
+  log_step "Undo summary"
+  log_success "$($DRY_RUN && echo 'would restore' || echo 'restored'): $restored"
+  [[ $skipped -gt 0 ]] && log_warn "skipped (missing): $skipped"
+  [[ $uerr -gt 0 ]] && log_error "errors: $uerr"
+  exit $(( uerr > 0 ? 1 : 0 ))
+}
+
 DRY_RUN=false
 RECURSE=true
 PREFIX_DATE=false
@@ -86,8 +148,11 @@ FORCE=false
 FN_FALLBACK=false        # use the filename's own YYYYMMDD_hhmmss when metadata has no valid date
 PREFER_NAME=false        # use the filename's own YYYYMMDD_hhmmss IN PREFERENCE TO the metadata date
 WARN_GAP=3600            # warn if a filename's own YYYYMMDD_hhmmss disagrees with the metadata by > this
+MANIFEST_FILE=""         # --manifest: record every change here (JSON) so the run is reversible
+UNDO_FILE=""             # --undo: reverse the changes recorded in this manifest, then exit
 EXTS=""
 TARGETS=()
+MANIFEST_ROWS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -98,12 +163,17 @@ while [[ $# -gt 0 ]]; do
     --prefer-filename)     PREFER_NAME=true; shift ;;
     -f|--force)            FORCE=true; shift ;;
     --warn-gap)            WARN_GAP="${2:-}"; shift 2 ;;
+    --manifest)            MANIFEST_FILE="${2:-}"; shift 2 ;;
+    --undo)                UNDO_FILE="${2:-}"; shift 2 ;;
     --ext)                 EXTS="${2:-}"; shift 2 ;;
     -h|--help)             usage; exit 0 ;;
     -*)                    log_error "Unknown option: $1"; usage; exit 1 ;;
     *)                     TARGETS+=("$1"); shift ;;
   esac
 done
+
+# --undo is a standalone mode: reverse a manifest and exit (no targets / exiftool needed).
+[[ -n "$UNDO_FILE" ]] && undo_manifest "$UNDO_FILE"
 
 if [[ ${#TARGETS[@]} -eq 0 ]]; then log_error "No target given."; usage; exit 1; fi
 [[ "$WARN_GAP" =~ ^[0-9]+$ ]] || { log_error "--warn-gap needs a whole number of seconds (0 disables)."; exit 1; }
@@ -141,7 +211,7 @@ TS_ANYWHERE='(^|[^0-9])'"$_ts"              # stamp anywhere: IMG_/VID_/PXL_ 202
 # Buffer exiftool's output to a temp file first, so a rename can never race exiftool's
 # own recursive walk (which might otherwise re-encounter a just-renamed file).
 _tmp="$(mktemp "${TMPDIR:-/tmp}/set-mtime.XXXXXX")"
-trap 'rm -f "$_tmp"' EXIT
+trap 'rm -f "$_tmp"; write_manifest' EXIT
 exiftool "${exif_args[@]}" "${TARGETS[@]}" > "$_tmp" 2>/dev/null || true
 
 while IFS=$'\t' read -r fmod dto cre mcre tcre src; do
@@ -192,7 +262,7 @@ while IFS=$'\t' read -r fmod dto cre mcre tcre src; do
     fi
   fi
 
-  acted=false
+  acted=false; mtime_did=false; final_path="$src"
 
   # (1) mtime — set it if it differs from the capture date.
   if [[ "$chosen" != "$fmod" ]]; then
@@ -206,7 +276,7 @@ while IFS=$'\t' read -r fmod dto cre mcre tcre src; do
       changed=$((changed + 1))
     elif touch -t "$chosen" -- "$src"; then
       log_success "mtime: $src  ${COLOR_DIM}${fmod} ->${COLOR_RESET} ${chosen}${gap}${note}"
-      changed=$((changed + 1))
+      changed=$((changed + 1)); mtime_did=true
     else
       log_error "touch failed: $src"
       errors=$((errors + 1))
@@ -232,12 +302,18 @@ while IFS=$'\t' read -r fmod dto cre mcre tcre src; do
         renamed=$((renamed + 1))
       elif mv -- "$src" "$newpath"; then
         log_success "name:  $base  ${COLOR_DIM}->${COLOR_RESET} $prefix $base"
-        renamed=$((renamed + 1))
+        renamed=$((renamed + 1)); final_path="$newpath"
       else
         log_error "rename failed: $src"
         errors=$((errors + 1))
       fi
     fi
+  fi
+
+  # record real changes for --manifest (in dry-run nothing was touched, so this is naturally empty).
+  if [[ -n "$MANIFEST_FILE" && ( $mtime_did == true || "$final_path" != "$src" ) ]]; then
+    json_esc "$src"; _op=$JE; json_esc "$final_path"; _fp=$JE
+    MANIFEST_ROWS+=("{\"orig_path\":\"$_op\",\"final_path\":\"$_fp\",\"orig_mtime\":\"$fmod\",\"mtime_changed\":$mtime_did}")
   fi
 
   $acted || same=$((same + 1))
@@ -255,5 +331,6 @@ log_info "unchanged: $same"
 [[ $nodate -gt 0 ]] && log_warn "no capture date: $nodate"
 [[ $errors -gt 0 ]] && log_error "errors: $errors"
 $DRY_RUN && [[ $changed -gt 0 || $renamed -gt 0 ]] && log_info "Re-run without --dry-run to apply."
+[[ -n "$MANIFEST_FILE" && ${#MANIFEST_ROWS[@]} -gt 0 ]] && log_info "manifest: $MANIFEST_FILE (${#MANIFEST_ROWS[@]} changes) — undo with:  $0 --undo '$MANIFEST_FILE'"
 log_info "took ${SECONDS}s"
 exit $(( errors > 0 ? 1 : 0 ))
