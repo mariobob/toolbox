@@ -20,9 +20,10 @@ set -euo pipefail
 #                      When the metadata has NO valid capture date, fall back to the filename's own
 #                      YYYYMMDD_hhmmss (e.g. Android VID_/IMG_ videos whose MP4 dates are zeroed).
 #       --prefer-filename
-#                      Use the filename's YYYYMMDD_hhmmss IN PREFERENCE TO the metadata whenever present.
-#                      It's the phone's on-location local time — correct for travel footage (metadata is
-#                      converted to THIS machine's timezone), and immune to editor-corrupted EXIF.
+#                      Prefer the filename's YYYYMMDD_hhmmss over the metadata, but only when they differ
+#                      by more than --warn-gap (so a photo's exact EXIF second is kept, and only genuinely
+#                      off cases switch: travel footage — metadata is converted to THIS machine's tz — and
+#                      editor-corrupted EXIF). Uses the filename's on-location local time.
 #       --warn-gap N   Warn when a filename's own YYYYMMDD_hhmmss stamp disagrees with the metadata
 #                      date by more than N seconds (default 3600; 0 disables). Catches e.g. Snapseed /
 #                      Lightroom edits that rewrote EXIF to a wrong capture date.
@@ -225,21 +226,26 @@ while IFS=$'\t' read -r fmod dto cre mcre tcre src; do
     fn_ts="${BASH_REMATCH[1]}${BASH_REMATCH[2]:0:4}.${BASH_REMATCH[2]:4:2}"   # %Y%m%d%H%M.%S
   fi
 
-  # (1) --prefer-filename: trust the filename's capture stamp over metadata — correct on-location local
-  #     time for travel footage, and sidesteps editor-corrupted EXIF.
-  if $PREFER_NAME && [[ -n "$fn_ts" ]]; then
-    chosen="$fn_ts"; from_name=true; fromname=$((fromname + 1))
-  fi
-  # (2) else the metadata date (DateTimeOriginal > CreateDate > MediaCreateDate > TrackCreateDate).
-  if [[ -z "$chosen" ]]; then
-    for cand in "$dto" "$cre" "$mcre" "$tcre"; do
-      if [[ "$cand" =~ $DATE_RE ]]; then chosen="$cand"; break; fi
-    done
-  fi
-  # (3) else fall back to the filename stamp, if --filename-fallback and metadata had none (e.g. Android
-  #     VID_/IMG_ videos whose MP4 create-dates are zeroed).
-  if [[ -z "$chosen" && $FN_FALLBACK == true && -n "$fn_ts" ]]; then
-    chosen="$fn_ts"; from_name=true; fromname=$((fromname + 1))
+  # Decide the capture date: metadata first (DateTimeOriginal > CreateDate > MediaCreateDate >
+  # TrackCreateDate), then let the filename override per --prefer-filename / --filename-fallback.
+  meta=''
+  for cand in "$dto" "$cre" "$mcre" "$tcre"; do
+    if [[ "$cand" =~ $DATE_RE ]]; then meta="$cand"; break; fi
+  done
+  chosen="$meta"
+  if [[ -n "$fn_ts" ]]; then
+    if [[ -z "$meta" ]]; then
+      # metadata has no valid date -> use the filename if either flag allows it (e.g. zeroed MP4 dates).
+      if $PREFER_NAME || $FN_FALLBACK; then chosen="$fn_ts"; from_name=true; fromname=$((fromname + 1)); fi
+    elif $PREFER_NAME; then
+      # metadata exists -> prefer the filename only when it disagrees by MORE than WARN_GAP, so a photo's
+      # exact EXIF second is kept and only genuinely-off cases (travel tz, corrupted EXIF) switch over.
+      to_epoch "$fn_ts"; _fe=$EPOCH; to_epoch "$meta"; _me=$EPOCH
+      if [[ -n "$_fe" && -n "$_me" ]]; then
+        _d=$(( _me - _fe ))
+        if [[ ${_d#-} -gt $WARN_GAP ]]; then chosen="$fn_ts"; from_name=true; fromname=$((fromname + 1)); fi
+      fi
+    fi
   fi
   if [[ -z "$chosen" ]]; then
     log_warn "no capture date, skipped: $src"
