@@ -10,7 +10,7 @@ alias lintcheck="~/path/to/lintcheck.sh"
 alias magic="~/path/to/reconnect-bluetooth-devices.sh"
 alias partial-push="~/path/to/partial-push.sh"
 alias pull-all="~/path/to/pull-all.sh"
-alias fix-mtime="~/path/to/set-mtime-from-exif.sh"
+alias timestamp-tool="~/path/to/timestamp-tool.sh"
 ```
 
 ## Scripts
@@ -50,9 +50,15 @@ Automatically reconnects Bluetooth devices.
 **Useful for:** Switching peripherals between computers (e.g. magic keyboard, trackpad, mouse, headphones).
 
 ### timestamp-tool.sh
-Sets each file's "Last Modified" time to its capture date from embedded metadata (EXIF `DateTimeOriginal` for photos, QuickTime `CreateDate` for videos, via exiftool). With `--prefix-date` it also renames each file, prepending `YYYYMMDD_hhmmss ` (capture date + a space) to its name — but names that already contain such a stamp *anywhere* (underscore or hyphen date/time separator — e.g. `IMG_20200719_183531.jpg`, `VID_…`, `PXL_…`, `Screenshot_20200719-183531.png`) are left as-is, so it never double-stamps; `--force` prefixes those too, keeping only names whose stamp is already at the very start. Each mtime line shows the old→new gap (e.g. `(+2s)`, `(-166d 15h)`) so big drifts stand out; `--warn-gap` flags files whose filename capture-stamp disagrees with the metadata date (catches EXIF corrupted by editors like Snapseed); `--filename-fallback` recovers the date from the filename's own `YYYYMMDD_hhmmss` when the metadata has none (e.g. Android videos with zeroed MP4 dates); and `--prefer-filename` uses that filename stamp over the metadata when they differ by more than `--warn-gap` (the phone's on-location local time — correct for travel footage, whose metadata gets converted to *this* machine's timezone — while a photo's exact EXIF second is kept). `--manifest <file>` records every change (old→new mtime and name) as JSON so the whole run is reversible with `--undo <file>`. Recursive by default, with `--dry-run`, `--no-recurse`, and `--ext` filtering; the mtime step never alters file content.
+Fixes media capture timestamps (photos & videos) from EXIF/QuickTime metadata or the filename's own `YYYYMMDD_hhmmss` stamp, via exiftool. Git-style subcommands:
 
-**Useful for:** Restoring correct timestamps after photos/videos lost them by copying between storages, emailing, or downloading — so they sort chronologically again.
+- **`mtime`** — set each file's filesystem "Last Modified" time to its capture date (`DateTimeOriginal` > `CreateDate` > `MediaCreateDate` > `TrackCreateDate`; content untouched). `--prefix-date` also renames each file with a `YYYYMMDD_hhmmss ` prefix (skips names that already contain such a stamp *anywhere* — `_` or `-` separator, e.g. `IMG_…`, `VID_…`, `PXL_…`, `Screenshot_…`; `--force` prefixes mid-name ones too). Each line shows the old→new gap (`(+2s)`, `(-166d 15h)`). `--warn-gap` flags filenames that disagree with the metadata (editor-corrupted EXIF); `--filename-fallback` uses the filename when metadata has none (e.g. Android videos with zeroed MP4 dates); `--prefer-filename` prefers the filename beyond the tolerance (on-location local time — fixes travel-tz, keeps a photo's exact EXIF second).
+- **`exif`** — write the filename's `YYYYMMDD_hhmmss` into `DateTimeOriginal`/`CreateDate` where they're missing or disagree by more than `--warn-gap` (makes the metadata canonical so every tool reads the right date). Rewrites the file; mtime preserved. Best for photos.
+- **`undo`** — reverse a run recorded with `--manifest` (renames back, restores mtime and/or EXIF). Needs jq.
+
+Common: `--dry-run`, `--no-recurse`, `--ext`, `--warn-gap N`, `--manifest <file>` (JSON change-log for full reversibility).
+
+**Useful for:** Restoring correct capture times after photos/videos lost or corrupted them (copying between storages, emailing, editing) — so they sort chronologically and read the right date everywhere.
 
 ### gp/add-to-gp-albums.js
 Adds your "missing from Google Photos person-album" photos **and videos** into per-contributor `[Photos] X dry-run` albums via exact-filename search, by attaching (over CDP) to your real, already-logged-in Chrome — sidestepping Google's automation sign-in block. Resumable, throttled, writes only to dry-run albums. All GP files live under `gp/`; setup + run steps in `gp/add-to-gp-albums.SETUP.md`.
