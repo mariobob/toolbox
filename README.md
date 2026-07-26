@@ -11,6 +11,7 @@ alias magic="~/path/to/reconnect-bluetooth-devices.sh"
 alias partial-push="~/path/to/partial-push.sh"
 alias pull-all="~/path/to/pull-all.sh"
 alias timestamp-tool="~/path/to/timestamp-tool.sh"
+alias wrap="~/path/to/wrap-commits.sh"
 ```
 
 ## Scripts
@@ -59,6 +60,15 @@ Fixes media capture timestamps (photos & videos) from EXIF/QuickTime metadata or
 Common: `--dry-run`, `--no-recurse`, `--ext`, `--warn-gap N`, `--manifest <file>` (JSON change-log for full reversibility).
 
 **Useful for:** Restoring correct capture times after photos/videos lost or corrupted them (copying between storages, emailing, editing) — so they sort chronologically and read the right date everywhere.
+
+### wrap-commits.sh
+Rewraps commit message bodies to a fixed width (default 72). By default it only touches commits no remote has yet (first unpushed commit .. HEAD); `--count N` reaches further back and warns before rewriting published history. Messages that are already within the width are left alone, so the tool is idempotent.
+
+The subject line is never rewrapped, only reported when too long. Indented/preformatted lines, ` ``` ` fenced blocks, quoted (`>`) and table (`|`) lines and the trailing `Key: value` trailer block are kept verbatim; everything else is unwrapped and refilled, with list items hanging-indented under their bullet and over-long words (URLs) never broken. The wrapping is pure Bash — no `fold`/`fmt`, so it behaves identically everywhere.
+
+Rewriting replays the range with `git commit-tree`, keeping each commit's tree, author and committer, then moves the branch with `git update-ref` — the index and working tree (uncommitted changes included) are never touched, and the old head stays in `git reflog`. Use `--dry-run` to preview, `--verbose` to see the rewrapped messages.
+
+**Useful for:** Tidying up a branch's commit messages to the 72-column convention right before opening a PR.
 
 ### gp/add-to-gp-albums.js
 Adds your "missing from Google Photos person-album" photos **and videos** into per-contributor `[Photos] X dry-run` albums via exact-filename search, by attaching (over CDP) to your real, already-logged-in Chrome — sidestepping Google's automation sign-in block. Resumable, throttled, writes only to dry-run albums. All GP files live under `gp/`; setup + run steps in `gp/add-to-gp-albums.SETUP.md`.
