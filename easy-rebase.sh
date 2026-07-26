@@ -5,6 +5,7 @@ rebase() {
     if [ -z "$1" ]; then
         echo "Usage:"
         echo "  rebase <N>        # interactive rebase last N commits (keeps committer date = author date)"
+        echo "  rebase root       # interactive rebase all commits, including the initial one"
         echo "  rebase <branch>   # pull <branch> then rebase current branch onto it"
         return 1
     fi
@@ -17,6 +18,12 @@ rebase() {
             return 1
         fi
         git rebase -i "HEAD~$n" --committer-date-is-author-date
+        return $?
+    fi
+
+    # Interactive rebase of the entire history, including the root commit
+    if [ "$1" = "root" ]; then
+        git rebase -i --root --committer-date-is-author-date
         return $?
     fi
 
