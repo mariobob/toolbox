@@ -9,6 +9,7 @@ set -euo pipefail
 #   -w, --width N    Wrap column (default 72).
 #   -c, --count N    Rewrite the last N commits instead of the unpushed ones. Reaching past
 #                    the first unpushed commit rewrites published history and asks first.
+#       --no-strip   Keep `Co-Authored-By:` trailers, which are dropped by default.
 #   -n, --dry-run    Show what would change; change nothing.
 #   -v, --verbose    Print the rewrapped message of every commit that changes.
 #   -y, --yes        Assume yes — required to rewrite pushed commits non-interactively.
@@ -17,6 +18,9 @@ set -euo pipefail
 #
 # By default the range is every commit that no remote-tracking branch has yet (first unpushed
 # commit .. HEAD), so the common case rewrites only local work.
+#
+# `Co-Authored-By:` trailers are removed unless --no-strip is given. Other trailers are kept,
+# and a trailer block left empty by the removal is dropped along with its blank separator.
 #
 # The subject (first line) is never rewrapped — rewrapping it would fold it into the body — it
 # is only reported when too long. Also left verbatim: indented/preformatted lines, ``` fenced
@@ -42,6 +46,7 @@ DRY_RUN=false
 VERBOSE=false
 AUTO_YES=false
 GPG_SIGN=false
+STRIP_COAUTHOR=true
 REPO_DIR="."
 
 BRANCH=""
@@ -76,6 +81,7 @@ T_PARAS_REFLOWED=0
 T_LITERAL=0
 T_OVERFLOW_WORDS=0
 T_TRAILING_WS=0
+T_COAUTHOR=0
 T_SIGNED=0
 REWRITTEN=0
 REBUILT=0                    # unchanged message, recreated because an ancestor moved
@@ -91,6 +97,7 @@ parse_args() {
             -v|--verbose)  VERBOSE=true; shift ;;
             -y|--yes)      AUTO_YES=true; shift ;;
             -S|--gpg-sign) GPG_SIGN=true; shift ;;
+            --no-strip)    STRIP_COAUTHOR=false; shift ;;
             -h|--help)     usage; exit 0 ;;
             -*)            log_error "Unknown option: $1"; usage; exit 1 ;;
             *)             REPO_DIR="$1"; shift ;;
@@ -154,15 +161,23 @@ fill_paragraph() {
 
 # Rewrap the commit message $1 to WIDTH.
 # Sets: W_TEXT (result) plus per-message counters W_LINES_IN/OUT, W_OVER_IN/OUT, W_MAX_IN/OUT,
-# W_SUBJ_OVER, W_PARAS, W_PARAS_REFLOWED, W_LITERAL, W_OVERFLOW_WORDS, W_TRAILING_WS.
+# W_SUBJ_OVER, W_PARAS, W_PARAS_REFLOWED, W_LITERAL, W_OVERFLOW_WORDS, W_TRAILING_WS, W_COAUTHOR.
 wrap_message() {
     local -a MSG_LINES=()
     local raw
     while IFS= read -r raw; do
         rtrim "$raw"
         [[ "$RT" != "$raw" ]] && W_TRAILING_WS=$(( W_TRAILING_WS + 1 ))
+        if $STRIP_COAUTHOR && [[ "$RT" =~ ^[Cc]o-[Aa]uthored-[Bb]y:[[:space:]] ]]; then
+            W_COAUTHOR=$(( W_COAUTHOR + 1 )); continue
+        fi
         MSG_LINES+=("$RT")
     done <<< "$1"
+
+    # Drop a trailer block the removal left empty, along with its blank separator.
+    local m=${#MSG_LINES[@]}
+    while (( m > 1 )) && [[ -z "${MSG_LINES[m - 1]}" ]]; do m=$(( m - 1 )); done
+    if (( m < ${#MSG_LINES[@]} )); then MSG_LINES=("${MSG_LINES[@]:0:m}"); fi
 
     local n=${#MSG_LINES[@]}
     # Ignore trailing blank lines on the way in so they don't count as a difference.
@@ -350,6 +365,7 @@ analyse_commits() {
         W_OUT=(); W_TEXT=""
         W_LINES_IN=0; W_LINES_OUT=0; W_OVER_IN=0; W_OVER_OUT=0; W_MAX_IN=0; W_MAX_OUT=0
         W_SUBJ_OVER=0; W_PARAS=0; W_PARAS_REFLOWED=0; W_LITERAL=0; W_OVERFLOW_WORDS=0; W_TRAILING_WS=0
+        W_COAUTHOR=0
         wrap_message "$msg"
 
         C_SUBJECTS+=("${W_OUT[0]}")
@@ -379,6 +395,7 @@ analyse_commits() {
         T_LITERAL=$(( T_LITERAL + W_LITERAL ))
         T_OVERFLOW_WORDS=$(( T_OVERFLOW_WORDS + W_OVERFLOW_WORDS ))
         T_TRAILING_WS=$(( T_TRAILING_WS + W_TRAILING_WS ))
+        T_COAUTHOR=$(( T_COAUTHOR + W_COAUTHOR ))
         (( W_MAX_IN  > T_MAX_IN  )) && T_MAX_IN=$W_MAX_IN
         (( W_MAX_OUT > T_MAX_OUT )) && T_MAX_OUT=$W_MAX_OUT
     done
@@ -594,6 +611,7 @@ print_summary() {
     log_info "paragraphs reflowed: ${T_PARAS_REFLOWED}/${T_PARAS}"
     (( T_LITERAL > 0 ))         && log_info "lines kept verbatim (indented, fenced, quoted, trailers): ${T_LITERAL}"
     (( T_TRAILING_WS > 0 ))     && log_info "lines with trailing whitespace trimmed: ${T_TRAILING_WS}"
+    (( T_COAUTHOR > 0 ))        && log_info "Co-Authored-By trailers removed: ${T_COAUTHOR}"
     (( T_SUBJ_OVER > 0 ))       && log_warn "subjects longer than ${WIDTH} (never rewrapped): ${T_SUBJ_OVER}"
     (( T_OVERFLOW_WORDS > 0 ))  && log_warn "words too long to fit (URLs, kept whole): ${T_OVERFLOW_WORDS}"
     (( T_OVER_OUT > 0 ))        && log_warn "lines still over ${WIDTH} afterwards: ${T_OVER_OUT}  ${COLOR_DIM}(subjects, verbatim lines, unbreakable words)${COLOR_RESET}"
